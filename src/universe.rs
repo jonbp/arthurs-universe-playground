@@ -22,6 +22,9 @@ pub struct Particle {
     pub life: f32,
     pub max_life: f32,
     pub flags: u8,
+    /// Mass this speck carries (rubble from a smash, a shredded world). A body that
+    /// swallows it gains the mass. Zero for pure decoration and for galaxy stars.
+    pub mass: f32,
 }
 
 /// Something worth hearing. The UI layer drains these each frame and plays them,
@@ -146,6 +149,24 @@ struct Probe {
 /// size, until one collision had filled the whole universe with weightless rocks.
 const MIN_FRAGMENT_RADIUS: f64 = 0.12;
 
+/// The most body-on-body pulls ever worked out in one frame, and the fewest the
+/// budget is cut to on a slow computer.
+pub const MAX_PAIR_BUDGET: usize = 10_000_000;
+pub const MIN_PAIR_BUDGET: usize = 400_000;
+
+/// A world smaller than this is not torn in two by a glancing hit: it hits or it misses.
+const GRAZE_MIN_RADIUS: f64 = 0.5;
+/// A glancing hit only tears a world in two if at least this much of it would sail past.
+const GRAZE_MIN_MISS: f64 = 0.15;
+/// The part that sails past is slowed by being torn free: it keeps this much of its speed...
+const GRAZE_SPEED_KEPT: f64 = 0.7;
+/// ...and sheds this much of its mass as loose pieces, thrown outwards at up to
+/// about a third of this fraction of the speed of the hit.
+const GRAZE_SHED: f64 = 0.4;
+const GRAZE_SPRAY: f64 = 0.5;
+/// What is left of a world torn in two is called its remnant.
+const REMNANT: &str = " remnant";
+
 /// Particles are integrated on several threads above this many per thread.
 const PARTICLES_PER_THREAD: usize = 8_192;
 const MAX_ATTRACTORS: usize = 16;
@@ -169,6 +190,12 @@ pub struct Universe {
     pub base_dt: f64,
     pub max_particles: usize,
     pub max_bodies: usize,
+    /// How many body-on-body pulls may be worked out in one frame. The game tunes
+    /// this to the speed of the computer (see `Game::tune_physics`).
+    pub pair_budget: usize,
+    /// Pulls worked out by the last `update`, and how long its steps took: what the tuning goes by.
+    pub step_work: usize,
+    pub step_seconds: f64,
     pub trail_len: usize,
     pub trail_interval: f64,
     pub paint: PaintStore,
@@ -179,6 +206,8 @@ pub struct Universe {
     /// Sounds since the UI last took them (see [`Sound`]).
     pub sounds: Vec<SoundEvent>,
     next_id: u64,
+    /// Simulated time since the populations were last brought up to date.
+    population_clock: f64,
     contacts: Vec<Contact>,
     scratch_probes: Vec<Probe>,
     scratch_acc: Vec<DVec3>,
@@ -199,6 +228,9 @@ impl Universe {
             base_dt: 0.004,
             max_particles: 150_000,
             max_bodies: 400,
+            pair_budget: MAX_PAIR_BUDGET,
+            step_work: 0,
+            step_seconds: 0.0,
             trail_len: 600,
             trail_interval: 1.0,
             paint: PaintStore::new(),
@@ -207,6 +239,7 @@ impl Universe {
             ship: None,
             sounds: Vec::new(),
             next_id: 1,
+            population_clock: 0.0,
             contacts: Vec::new(),
             scratch_probes: Vec::new(),
             scratch_acc: Vec::new(),
@@ -338,12 +371,17 @@ impl Universe {
         let total = real_dt * time_scale;
         let n = self.bodies.len().max(2);
         let pairs = n * (n - 1) / 2;
-        let max_steps = (10_000_000 / pairs).clamp(4, 3000);
+        // Crowded universes get fewer, longer steps (and past the longest step, time
+        // simply runs slower than asked) so that a frame never takes too long.
+        let max_steps = (self.pair_budget / pairs).clamp(4, 3000);
         let steps = ((total / self.base_dt).ceil() as usize).clamp(1, max_steps);
         let dt = (total / steps as f64).min(0.05);
+        let started = std::time::Instant::now();
         for _ in 0..steps {
             self.step(dt);
         }
+        self.step_work = steps * pairs;
+        self.step_seconds = started.elapsed().as_secs_f64();
         let simulated = dt * steps as f64;
         self.time += simulated;
         for b in &mut self.bodies {
@@ -356,6 +394,71 @@ impl Universe {
         self.update_particles(simulated as f32);
         self.update_supernovae(simulated);
         self.update_shockwaves(simulated);
+        self.name_new_moons();
+        self.population_clock += simulated;
+        if self.population_clock >= crate::population::INTERVAL {
+            let dt = std::mem::take(&mut self.population_clock);
+            crate::population::update(self, dt);
+        }
+    }
+
+    /// The people of body `idx` leave it, safely, before something terrible happens to it.
+    fn evacuate(&mut self, idx: usize) {
+        let b = &mut self.bodies[idx];
+        let people = std::mem::take(&mut b.population);
+        if people >= 1.0 && !b.name.is_empty() {
+            let name = b.name.clone();
+            self.event(format!("🚀 The {} people of {name} escaped in their rockets just in time", crate::population::fmt_people(people)));
+        }
+    }
+
+    /// A label, not physics: when what is left of a torn or shattered world turns
+    /// out to be circling a much bigger one, on an orbit that clears the ground and
+    /// that nothing heavier will pull it out of, call it what it now is: a moon.
+    fn name_new_moons(&mut self) {
+        for i in 0..self.bodies.len() {
+            let m = &self.bodies[i];
+            if !is_leftover(m) || !m.alive || m.kind.is_stellar() || m.ghost > 0.0 || m.radius < 0.3 {
+                continue;
+            }
+            // The world it belongs to: the strongest grip among those far heavier than it.
+            let grip = |o: &Body| o.mass / (o.pos - m.pos).length().powi(3).max(1e-9);
+            let Some(h) = self.bodies.iter().filter(|o| o.alive && !o.kind.is_stellar() && !is_leftover(o) && o.mass > m.mass * 10.0).max_by(|a, b| grip(a).total_cmp(&grip(b))) else {
+                continue;
+            };
+            let (r, v) = (m.pos - h.pos, m.vel - h.vel);
+            let gm = self.g * (h.mass + m.mass);
+            let energy = v.length_squared() / 2.0 - gm / r.length();
+            if energy >= 0.0 {
+                continue;
+            }
+            let half_width = -gm / (2.0 * energy);
+            let oval = (1.0 - r.cross(v).length_squared() / (gm * half_width)).max(0.0).sqrt();
+            let (lowest, highest) = (half_width * (1.0 - oval), half_width * (1.0 + oval));
+            let hill = self
+                .bodies
+                .iter()
+                .filter(|o| o.alive && o.mass > h.mass)
+                .map(|o| (o.pos - h.pos).length() * (h.mass / (3.0 * o.mass)).cbrt())
+                .fold(f64::INFINITY, f64::min);
+            if lowest < h.radius * 1.1 + m.radius || highest > hill * 0.5 {
+                continue;
+            }
+            // The biggest piece gets the name: wait if a heavier leftover is still circling.
+            let bound = |o: &Body| (o.vel - h.vel).length_squared() / 2.0 < self.g * (h.mass + o.mass) / (o.pos - h.pos).length().max(1e-9);
+            let heavier = |o: &Body| o.alive && o.id != h.id && o.mass > m.mass && is_leftover(o) && bound(o);
+            if self.bodies.iter().any(heavier) {
+                continue;
+            }
+            let name = if h.name.contains("Earth") && !self.bodies.iter().any(|o| o.name == "Moon") { "Moon".to_string() } else { format!("Moon of {}", h.name) };
+            if self.bodies.iter().any(|o| o.name == name) {
+                continue;
+            }
+            let was = if m.name.is_empty() { "A leftover piece".to_string() } else { m.name.clone() };
+            let message = format!("🌙 {was} has settled into orbit around {}: it is a moon now!", h.name);
+            self.bodies[i].name = name;
+            self.event(message);
+        }
     }
 
     fn update_visual_decay(&mut self, dt: f32) {
@@ -490,8 +593,14 @@ impl Universe {
                     let (bi, bj) = (&bodies[i], &bodies[j]);
                     // Fresh fragments pass through other worlds for a moment, and in ghost
                     // mode all worlds do; stars and black holes always swallow.
-                    let ghosted = (pass_through || bi.ghost > 0.0 || bj.ghost > 0.0) && !bi.kind.is_stellar() && !bj.kind.is_stellar();
-                    if !ghosted {
+                    let worlds = !bi.kind.is_stellar() && !bj.kind.is_stellar();
+                    let ghosted = (pass_through || bi.ghost > 0.0 || bj.ghost > 0.0) && worlds;
+                    // Two worlds whose edges overlap but which are already moving apart
+                    // have had their collision: they meet again only if they come back.
+                    // (Not when one is deep inside the other: that is a hit, however it got there.)
+                    let shallow = d2 > (0.9 * pi.radius.max(pj.radius)).powi(2);
+                    let parting = worlds && shallow && d.dot(bj.vel - bi.vel) > 0.0;
+                    if !ghosted && !parting {
                         contacts.push(Contact::Touch(i, j));
                     }
                 } else if tidal {
@@ -590,6 +699,9 @@ impl Universe {
         if self.collisions == CollisionMode::PassThrough {
             return;
         }
+        // A glancing hit: only the part of the smaller world that is actually in the
+        // way takes part in what follows. The rest carries on past.
+        let small = if self.collisions == CollisionMode::Realistic { self.graze(big, small) } else { small };
 
         let (bb, sb) = (&self.bodies[big], &self.bodies[small]);
         let rel_v = (sb.vel - bb.vel).length();
@@ -614,6 +726,100 @@ impl Universe {
         } else {
             self.planet_shatter(big, small, energy, ratio, q_ratio);
         }
+    }
+
+    /// Work out how much of `small` is really in the way of `big`, by following
+    /// points spread through it along the direction it is travelling: those whose
+    /// path runs into `big` hit it, those whose path clears it sail past.
+    ///
+    /// If a fair share sails past, `small` is torn in two. It lives on as the part
+    /// that missed (slowed by the tearing, and shedding some loose pieces), and a new
+    /// body made of the part that hit is returned to take its place in the collision.
+    /// Nothing here decides where anything ends up: gravity does that afterwards.
+    /// Fast and it flies off, slow and it falls back for another go, and at about
+    /// the speed and angle of the real Theia some of it stays in orbit.
+    fn graze(&mut self, big: usize, small: usize) -> usize {
+        let (b, s) = (self.bodies[big].clone(), self.bodies[small].clone());
+        let approach = s.vel - b.vel;
+        let Some(dir) = approach.try_normalize() else { return small };
+        if s.radius < GRAZE_MIN_RADIUS || self.bodies.len() >= self.max_bodies {
+            return small;
+        }
+        const SAMPLES: usize = 240;
+        let (mut hit, mut miss) = (DVec3::ZERO, DVec3::ZERO);
+        let mut missed = 0;
+        for _ in 0..SAMPLES {
+            let p = s.pos + self.rng.unit() * s.radius * self.rng.f64().cbrt();
+            let from_centre = p - b.pos;
+            // How far to the side of `big`'s centre this point's path passes.
+            let aside = (from_centre - dir * from_centre.dot(dir)).length();
+            if aside > b.radius {
+                miss += p;
+                missed += 1;
+            } else {
+                hit += p;
+            }
+        }
+        let share = missed as f64 / SAMPLES as f64;
+        if share < GRAZE_MIN_MISS || missed == SAMPLES {
+            return small;
+        }
+        // It is about to be torn in two: time to go.
+        self.evacuate(small);
+        let s = Body { population: 0.0, ..s };
+        let (hit_at, miss_at) = (hit / (SAMPLES - missed) as f64, miss / missed as f64);
+        let miss_mass = s.mass * share;
+        let shed = miss_mass * GRAZE_SHED;
+
+        // The part that hit: a new body, right where that part of `small` was.
+        let mut part = self.new_body("", s.kind, hit_at, s.vel);
+        part.mass = s.mass - miss_mass;
+        part.radius = s.radius * (part.mass / s.mass).cbrt();
+        part.surface = s.surface.clone();
+        part.temperature = s.temperature;
+        let part_idx = self.bodies.len();
+        self.bodies.push(part);
+
+        // The part that missed carries on as `small` itself, slower than it came.
+        let onward = b.vel + approach * GRAZE_SPEED_KEPT;
+        let runner = &mut self.bodies[small];
+        runner.mass = miss_mass - shed;
+        runner.radius = s.radius * (runner.mass / s.mass).cbrt();
+        runner.pos = miss_at;
+        runner.vel = onward;
+        runner.heat = 1.0;
+        runner.flash = 1.0;
+        // It brushes on past without being counted as hitting again, until its
+        // closest approach; after that the two are parting.
+        let to_closest = -(miss_at - b.pos).dot(approach) / approach.length_squared();
+        runner.ghost = (to_closest * 2.0 + 0.3).clamp(0.5, 4.0);
+        let runner = runner.clone();
+        // What it lost in speed was spent dragging on `big`.
+        self.bodies[big].vel += (s.vel - onward) * (miss_mass / b.mass);
+        // Loose pieces come off its outer side.
+        let out = (miss_at - b.pos).try_normalize().unwrap_or(dir);
+        let outward = (out - dir * out.dot(dir)).try_normalize().unwrap_or(out);
+        let count = 3 + (s.radius * 2.0) as usize;
+        let first_piece = self.bodies.len();
+        self.spawn_fragments(&s, shed, count.min(8), miss_at + outward * runner.radius * 0.5, onward, outward, approach.length() * GRAZE_SPRAY, &b);
+        // Throwing them off pushes the remnant back the other way, and whatever
+        // crumbled to dust rather than pieces stays part of it.
+        let pieces = &self.bodies[first_piece..];
+        let thrown: f64 = pieces.iter().map(|f| f.mass).sum();
+        let kick: DVec3 = pieces.iter().map(|f| (f.vel - onward) * f.mass).sum();
+        let runner = &mut self.bodies[small];
+        runner.mass += shed - thrown;
+        runner.radius = s.radius * (runner.mass / s.mass).cbrt();
+        runner.vel -= kick / runner.mass;
+        // A whole world that is torn becomes its remnant; rubble stays rubble.
+        let whole = !s.name.is_empty() && !is_leftover(&s);
+        if whole {
+            runner.name = format!("{}{REMNANT}", s.name);
+        }
+        if whole && !b.name.is_empty() {
+            self.event(format!("💫 {} struck {} a glancing blow and was torn in two", s.name, b.name));
+        }
+        part_idx
     }
 
     fn impact_info(&self, big: usize, small: usize) -> (DVec3, DVec3) {
@@ -649,6 +855,7 @@ impl Universe {
     /// `big` swallows `small`. The result keeps their combined momentum and sits at
     /// their shared centre of mass, so a merger never jolts the rest of the system.
     fn absorb(&mut self, big: usize, small: usize, splash: bool) {
+        self.evacuate(small);
         let s = self.bodies[small].clone();
         let (impact, n) = self.impact_info(big, small);
         let b = &mut self.bodies[big];
@@ -726,6 +933,7 @@ impl Universe {
     }
 
     fn planet_shatter(&mut self, big: usize, small: usize, energy: f64, ratio: f64, q_ratio: f64) {
+        self.evacuate(small);
         let (impact, n) = self.impact_info(big, small);
         let b = self.bodies[big].clone();
         let s = self.bodies[small].clone();
@@ -749,6 +957,7 @@ impl Universe {
 
         if destroyed {
             // Catastrophic disruption: big body breaks apart too.
+            self.evacuate(big);
             self.bodies[big].alive = false;
             let frags = 5 + (b.radius * 2.0) as usize;
             self.spawn_fragments(&b, b.mass * 0.9, frags.min(14), b.pos, com_vel, -n, rel_v * 0.6, &s);
@@ -773,25 +982,13 @@ impl Universe {
             self.crater(big, n, ang, 1.0);
         }
 
-        // The pieces fly apart in random directions, which on its own would hand the
-        // wreckage a sideways kick out of nowhere. Shift them all together so that,
-        // as a whole, it carries on exactly as the two worlds were moving.
-        let wreckage = || (first_fragment..self.bodies.len()).chain(self.bodies[big].alive.then_some(big));
-        let mass: f64 = wreckage().map(|i| self.bodies[i].mass).sum();
-        if mass > 0.0 {
-            let momentum: DVec3 = wreckage().map(|i| self.bodies[i].vel * self.bodies[i].mass).sum();
-            let shift = com_vel - momentum / mass;
-            for i in wreckage().collect::<Vec<_>>() {
-                self.bodies[i].vel += shift;
-            }
-        }
-
         // Debris cloud and bright flash.
         // (Scaled down for rubble, so a pebble doesn't burst into a planet's worth of sparks.)
         let rubble = s.radius.min(1.0).powi(2);
         let count = ((1500.0 + (s.radius + b.radius * big_destroy) * 900.0) * rubble).min(9000.0) as usize;
         let dc1 = s.debris_color();
         let dc2 = b.debris_color();
+        let cloud_start = self.particles.len();
         for k in 0..count {
             let dir = (n * 0.6 + self.rng.unit()).normalize();
             let speed = rel_v * self.rng.range(0.05, 0.7);
@@ -811,6 +1008,23 @@ impl Universe {
                 self.rng.rangef(3.0, 14.0),
                 P_GRAVITY | if roll < 0.35 { P_HOT } else { 0 },
             );
+        }
+        // The pieces and the dust fly apart in random directions, which on its own would
+        // hand the wreckage a sideways kick out of nowhere. Shift the pieces together so
+        // that, dust included, it all carries on exactly as the two worlds were moving.
+        let wreckage: Vec<usize> = (first_fragment..self.bodies.len()).chain(self.bodies[big].alive.then_some(big)).collect();
+        let mass: f64 = wreckage.iter().map(|&i| self.bodies[i].mass).sum();
+        // What is not in the pieces is in the dust cloud.
+        self.give_mass_to_newest(self.particles.len() - cloud_start, (m_tot - mass).max(0.0));
+        let cloud = &self.particles[cloud_start..];
+        let cloud_mass: f64 = cloud.iter().map(|p| p.mass as f64).sum();
+        let cloud_momentum: DVec3 = cloud.iter().map(|p| p.vel.as_dvec3() * p.mass as f64).sum();
+        if mass > 0.0 {
+            let momentum: DVec3 = wreckage.iter().map(|&i| self.bodies[i].vel * self.bodies[i].mass).sum();
+            let shift = (com_vel * (mass + cloud_mass) - cloud_momentum - momentum) / mass;
+            for i in wreckage {
+                self.bodies[i].vel += shift;
+            }
         }
         self.sound(Sound::Smash, Some(impact), (s.radius + b.radius) as f32);
         self.flashes.push(Flash {
@@ -859,7 +1073,7 @@ impl Universe {
             }
             let v = base_vel + dir * speed * self.rng.range(0.15, 0.6);
             let kind = if r > 0.7 && self.rng.f32() < 0.5 { BodyKind::Lava } else { BodyKind::Asteroid };
-            let name = if src.name.is_empty() || src.name.contains("fragment") || k > 1 {
+            let name = if is_leftover(src) || k > 1 {
                 String::new()
             } else {
                 format!("{} fragment {}", src.name, k + 1)
@@ -941,6 +1155,7 @@ impl Universe {
 
     /// Tidal disruption: a body passing too close to a black hole is torn into a stream.
     fn spaghettify(&mut self, bh: usize, victim: usize) {
+        self.evacuate(victim);
         let v = self.bodies[victim].clone();
         self.bodies[victim].alive = false;
         let b = &mut self.bodies[bh];
@@ -957,11 +1172,14 @@ impl Universe {
         let count = (v.radius * 900.0).clamp(1500.0, 12000.0) as usize;
         let color = v.debris_color();
         let hot = v.kind == BodyKind::Star;
+        let stream_start = self.particles.len();
         for _ in 0..count {
             let off = self.rng.unit() * v.radius * self.rng.f64().cbrt();
             let c = if hot || self.rng.f32() < 0.3 { Vec3::new(1.0, 0.65, 0.3) * 2.0 } else { color * 1.3 };
             self.emit(v.pos + off, v.vel + self.rng.unit() * 0.3, c, (v.radius as f32 * 0.05).clamp(0.08, 0.6), self.rng.rangef(30.0, 80.0), P_GRAVITY | P_HOT);
         }
+        // The rest of the victim is in the stream, to be eaten bit by bit.
+        self.give_mass_to_newest(self.particles.len() - stream_start, v.mass - eaten);
     }
 
     // ------------------------------------------------------------------
@@ -1102,7 +1320,8 @@ impl Universe {
             let close = d < 30.0 + ej.sqrt() * 0.25;
             if close && b.kind.paintable() && b.radius < 8.0 {
                 // vaporised: shatter into molten debris
-                let src = b.clone();
+                self.evacuate(i);
+                let src = self.bodies[i].clone();
                 self.bodies[i].alive = false;
                 if !src.name.is_empty() {
                     self.event(format!("☄ {} was vaporised by the blast", src.name));
@@ -1138,7 +1357,21 @@ impl Universe {
         if self.particles.len() >= self.max_particles {
             return;
         }
-        self.particles.push(Particle { pos: pos.as_vec3(), vel: vel.as_vec3(), color, size, life, max_life: life, flags });
+        self.particles.push(Particle { pos: pos.as_vec3(), vel: vel.as_vec3(), color, size, life, max_life: life, flags, mass: 0.0 });
+    }
+
+    /// Share `mass` out among the `count` particles emitted most recently, so that
+    /// whatever lands on a world (or falls into a black hole) is added to it.
+    fn give_mass_to_newest(&mut self, count: usize, mass: f64) {
+        let n = count.min(self.particles.len());
+        if n == 0 || mass <= 0.0 {
+            return;
+        }
+        let each = (mass / n as f64) as f32;
+        let from = self.particles.len() - n;
+        for p in &mut self.particles[from..] {
+            p.mass = each;
+        }
     }
 
     fn update_particles(&mut self, dt: f32) {
@@ -1170,23 +1403,33 @@ impl Universe {
             std::thread::scope(|scope| {
                 let workers: Vec<_> =
                     self.particles.chunks_mut(chunk).map(|c| scope.spawn(move || integrate_particles(c, attractors, dt, max_steps))).collect();
-                let mut fed = [0u32; MAX_ATTRACTORS];
+                let mut fed = Fed::default();
                 for w in workers {
-                    let part = w.join().expect("particle worker panicked");
-                    for (total, n) in fed.iter_mut().zip(part) {
-                        *total += n;
-                    }
+                    fed.add(&w.join().expect("particle worker panicked"));
                 }
                 fed
             })
         };
         self.particles.retain(|p| p.life > 0.0);
-        for (k, n) in fed.iter().enumerate() {
-            if *n > 0 {
-                let b = &mut self.bodies[idx[k]];
-                if b.kind == BodyKind::BlackHole {
-                    b.feeding = (b.feeding + *n as f32 * 0.002).min(5.0);
+        for (k, &i) in idx.iter().enumerate() {
+            if fed.count[k] == 0 {
+                continue;
+            }
+            let b = &mut self.bodies[i];
+            if b.kind == BodyKind::BlackHole {
+                b.feeding = (b.feeding + fed.count[k] as f32 * 0.002).min(5.0);
+            }
+            // Dust with mass makes whatever it lands on a little heavier (and nudges it).
+            let gained = fed.mass[k] as f64;
+            if gained > 0.0 {
+                let m = b.mass + gained;
+                b.vel = (b.vel * b.mass + fed.momentum[k].as_dvec3()) / m;
+                match b.kind {
+                    BodyKind::BlackHole => b.radius = black_hole_radius(m),
+                    BodyKind::NeutronStar => {}
+                    _ => b.radius *= (m / b.mass).cbrt(),
                 }
+                b.mass = m;
             }
         }
     }
@@ -1305,6 +1548,25 @@ fn worker_threads() -> usize {
     *N.get_or_init(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8))
 }
 
+/// What each attractor swallowed while the particles were being moved.
+#[derive(Clone, Copy, Default)]
+struct Fed {
+    count: [u32; MAX_ATTRACTORS],
+    mass: [f32; MAX_ATTRACTORS],
+    /// Mass times velocity of what was swallowed.
+    momentum: [Vec3; MAX_ATTRACTORS],
+}
+
+impl Fed {
+    fn add(&mut self, other: &Fed) {
+        for k in 0..MAX_ATTRACTORS {
+            self.count[k] += other.count[k];
+            self.mass[k] += other.mass[k];
+            self.momentum[k] += other.momentum[k];
+        }
+    }
+}
+
 /// The longest step a particle takes while it is cheap to take short ones (slow game speeds).
 const PARTICLE_STEP: f32 = 0.02;
 /// At faster game speeds a particle's step is this fraction of its orbital timescale
@@ -1316,14 +1578,14 @@ const PARTICLE_MAX_STEPS: u32 = 48;
 /// and fewer when there is a lot of dust: about this many particle-attractor pulls a frame.
 const PARTICLE_WORK: usize = 2_500_000;
 
-/// Advance a slice of particles by `dt`. Returns how many particles each attractor swallowed.
+/// Advance a slice of particles by `dt`. Returns what each attractor swallowed.
 ///
 /// Each particle picks its own step length as it goes. One fixed step for all of
 /// them made galaxies and accretion disks fly apart when time was sped up: the dust
 /// nearest the centre was taking only a handful of steps per orbit.
-fn integrate_particles(particles: &mut [Particle], attractors: &[Attractor], dt: f32, max_steps: u32) -> [u32; MAX_ATTRACTORS] {
+fn integrate_particles(particles: &mut [Particle], attractors: &[Attractor], dt: f32, max_steps: u32) -> Fed {
     const DRAG: f32 = 0.12;
-    let mut fed = [0u32; MAX_ATTRACTORS];
+    let mut fed = Fed::default();
     for p in particles {
         if p.flags & P_GRAVITY != 0 {
             // Time still to cover this frame, and the steps left to do it in.
@@ -1340,7 +1602,9 @@ fn integrate_particles(particles: &mut [Particle], attractors: &[Attractor], dt:
                     if d2 < a.r2 {
                         // Swallowed: count it once and stop integrating it.
                         p.life = -1.0;
-                        fed[k] += 1;
+                        fed.count[k] += 1;
+                        fed.mass[k] += p.mass;
+                        fed.momentum[k] += p.vel * p.mass;
                         break 'steps;
                     }
                     let s = d2 + 0.05;
@@ -1377,6 +1641,11 @@ fn integrate_particles(particles: &mut [Particle], attractors: &[Attractor], dt:
         }
     }
     fed
+}
+
+/// Debris with no name of its own yet: nameless rubble, or what is left of a broken world.
+fn is_leftover(b: &Body) -> bool {
+    b.name.is_empty() || b.name.ends_with(REMNANT) || b.name.contains(" fragment ")
 }
 
 #[cfg(test)]
@@ -1525,6 +1794,7 @@ mod tests {
                     size: 0.1,
                     life: 5.0,
                     max_life: 5.0,
+                    mass: 0.0,
                     flags: if k % 3 == 0 { P_GRAVITY | P_DRAG } else { P_GRAVITY },
                 })
                 .collect()
@@ -1538,7 +1808,7 @@ mod tests {
         let mut reference = u.particles.clone();
         let fed = integrate_particles(&mut reference, &attractors, 0.05, PARTICLE_MAX_STEPS);
         reference.retain(|p| p.life > 0.0);
-        assert!(fed[0] > 0, "expected some particles to fall into the hole");
+        assert!(fed.count[0] > 0, "expected some particles to fall into the hole");
         u.update_particles(0.05);
         assert_eq!(u.particles.len(), reference.len());
         assert!(u.particles.iter().zip(&reference).all(|(x, y)| x.pos == y.pos && x.vel == y.vel && x.life == y.life));
@@ -1581,10 +1851,16 @@ mod tests {
             }
         }
         assert!(u.bodies.len() > 2, "expected fragments, got {}", u.bodies.len());
-        // Some mass turns to dust, but the wreckage as a whole keeps moving as the pair did.
-        let mass: f64 = u.bodies.iter().map(|b| b.mass).sum();
-        let now = u.bodies.iter().map(|b| b.vel * b.mass).sum::<DVec3>() / mass;
-        assert!((now - drift).length() < 1e-6, "wreckage drifts at {now:?}, the pair was drifting at {drift:?}");
+        // Pieces and dust together still weigh what the two worlds did...
+        let dust = |u: &Universe| u.particles.iter().map(|p| p.mass as f64).sum::<f64>();
+        let mass = u.bodies.iter().map(|b| b.mass).sum::<f64>() + dust(&u);
+        assert!((mass - 80.0).abs() < 0.01, "80 units of world became {mass}");
+        assert!(dust(&u) > 1.0, "some of it should be dust");
+        // ...and keep moving as the pair did (near enough: dust is pulled by the
+        // pieces without pulling back, which costs a hair in the frame of the smash).
+        let momentum = u.bodies.iter().map(|b| b.vel * b.mass).sum::<DVec3>() + u.particles.iter().map(|p| p.vel.as_dvec3() * p.mass as f64).sum::<DVec3>();
+        let now = momentum / mass;
+        assert!((now - drift).length() < 0.02, "wreckage drifts at {now:?}, the pair was drifting at {drift:?}");
     }
 
     #[test]
@@ -1658,6 +1934,178 @@ mod tests {
             let d = p.pos.length() as f64;
             assert!((d / r - 1.0).abs() < 0.05, "dust wandered from radius {r} to {d:.1}");
         }
+    }
+
+    #[test]
+    fn dust_that_lands_makes_a_world_heavier() {
+        let mut u = Universe::new("t", 13);
+        let p = u.new_body("World", BodyKind::Rocky, DVec3::ZERO, DVec3::ZERO).with_mass_radius(40.0, 2.0);
+        let id = u.add(p);
+        // A clump of rubble weighing 2 in all, falling in from one side at speed 3.
+        for k in 0..100 {
+            u.emit(DVec3::new(4.0, k as f64 * 0.01, 0.0), DVec3::new(-3.0, 0.0, 0.0), Vec3::ONE, 0.1, 30.0, P_GRAVITY);
+        }
+        u.give_mass_to_newest(100, 2.0);
+        for _ in 0..120 {
+            u.update(1.0 / 60.0, 1.0, false);
+        }
+        assert!(u.particles.is_empty(), "the rubble should have landed");
+        let b = u.get(id).unwrap();
+        assert!((b.mass - 42.0).abs() < 1e-3, "40 + 2 of rubble made {}", b.mass);
+        assert!(b.radius > 2.0, "a heavier world is a bigger one");
+        assert!(b.vel.x < -0.1, "the rubble should have nudged it along, got {:?}", b.vel);
+    }
+
+    #[test]
+    fn black_hole_eats_the_rest_of_its_victim_over_time() {
+        let mut u = Universe::new("t", 5);
+        let mut bh = u.new_body("BH", BodyKind::BlackHole, DVec3::ZERO, DVec3::ZERO);
+        bh.mass = 30000.0;
+        bh.radius = black_hole_radius(bh.mass);
+        let id = u.add(bh);
+        let p = u.new_body("Victim", BodyKind::Earthlike, DVec3::new(15.0, 0.0, 0.0), DVec3::ZERO).with_mass_radius(40.0, 2.0);
+        u.add(p);
+        u.update(0.004, 1.0, false);
+        // Torn apart: a third swallowed at once, the rest still there as a stream.
+        let stream: f64 = u.particles.iter().map(|p| p.mass as f64).sum();
+        assert!((u.get(id).unwrap().mass - 30012.0).abs() < 1e-6);
+        assert!((stream - 28.0).abs() < 0.01, "the stream should weigh 28, not {stream}");
+        for _ in 0..600 {
+            u.update(1.0 / 60.0, 1.0, false);
+        }
+        let eaten = u.get(id).unwrap().mass - 30012.0;
+        assert!(eaten > 10.0, "the hole should have fed on the stream, but only gained {eaten}");
+    }
+
+    /// A world of 60 and one of 14, as in the Theia preset but alone in space.
+    fn two_worlds(u: &mut Universe, offset: f64, speed: f64) -> (u64, u64) {
+        let a = u.new_body("Earth", BodyKind::Earthlike, DVec3::ZERO, DVec3::ZERO).with_mass_radius(60.0, 2.6);
+        let b = u.new_body("Theia", BodyKind::Desert, DVec3::new(32.0, 0.0, offset), DVec3::new(-speed, 0.0, 0.0)).with_mass_radius(14.0, 1.7);
+        (u.add(a), u.add(b))
+    }
+
+    fn weigh(u: &Universe) -> (f64, DVec3) {
+        let dust = u.particles.iter().map(|p| (p.mass as f64, p.vel.as_dvec3()));
+        u.bodies.iter().map(|b| (b.mass, b.vel)).chain(dust).fold((0.0, DVec3::ZERO), |(m, p), (bm, bv)| (m + bm, p + bv * bm))
+    }
+
+    #[test]
+    fn glancing_blow_tears_a_world_in_two() {
+        let mut u = Universe::new("t", 14);
+        let (earth, theia) = two_worlds(&mut u, 5.85, 4.75);
+        let (mass, momentum) = weigh(&u);
+        while u.bodies.len() == 2 {
+            u.update(1.0 / 60.0, 1.0, false);
+            assert!(u.time < 30.0, "they never met");
+        }
+        // Part of Theia has sunk into the Earth; the rest carries on, with pieces coming off it.
+        let (e, t) = (u.get(earth).unwrap(), u.get(theia).unwrap());
+        assert!(e.mass > 60.1 && e.mass < 73.0, "Earth should have taken part of Theia, it weighs {}", e.mass);
+        assert!(t.mass > 1.0 && t.mass < 13.0, "part of Theia should carry on, it weighs {}", t.mass);
+        assert_eq!(t.name, "Theia remnant");
+        assert!(u.bodies.len() > 2, "loose pieces should have come off");
+        // Nothing appears or vanishes in the tearing.
+        let (mass_after, momentum_after) = weigh(&u);
+        assert!((mass_after - mass).abs() < 1e-6, "{mass} units of world became {mass_after}");
+        assert!((momentum_after - momentum).length() < 0.05, "momentum went from {momentum:?} to {momentum_after:?}");
+    }
+
+    #[test]
+    fn head_on_hit_tears_nothing_off() {
+        let mut u = Universe::new("t", 15);
+        two_worlds(&mut u, 0.0, 2.0);
+        for _ in 0..900 {
+            u.update(1.0 / 60.0, 1.0, false);
+        }
+        assert_eq!(u.bodies.len(), 1, "a slow dead-centre hit is a plain merger");
+        assert!((u.bodies[0].mass - 74.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fast_glancing_blow_is_a_hit_and_run() {
+        let mut u = Universe::new("t", 17);
+        let (earth, theia) = two_worlds(&mut u, 5.0, 14.0);
+        for _ in 0..600 {
+            u.update(1.0 / 60.0, 1.0, false);
+        }
+        // Far too fast to be caught: what is left of Theia leaves for good.
+        let (e, t) = (u.get(earth).unwrap(), u.get(theia).expect("the remnant should survive"));
+        let (r, v) = (t.pos - e.pos, t.vel - e.vel);
+        assert!(v.length_squared() / 2.0 > u.g * (e.mass + t.mass) / r.length(), "the remnant should be escaping");
+        assert!(r.length() > 30.0);
+    }
+
+    /// Is there a proper moon round `host`: a fair size, bound, and staying close?
+    fn has_moon(u: &Universe, host: &str) -> bool {
+        let Some(e) = u.bodies.iter().find(|b| b.name == host) else { return false };
+        u.bodies.iter().any(|m| {
+            let (r, v) = (m.pos - e.pos, m.vel - e.vel);
+            let energy = v.length_squared() / 2.0 - u.g * (e.mass + m.mass) / r.length();
+            m.name.starts_with("Moon") && m.mass > 0.5 && energy < 0.0 && r.length() < 40.0
+        })
+    }
+
+    #[test]
+    fn glancing_blows_sometimes_leave_a_moon() {
+        // Nothing is placed in orbit by hand, so it depends on how the pieces fly:
+        // with the right kind of hit a moon is common, but never certain.
+        let moons = (0..24u64)
+            .filter(|seed| {
+                let mut u = Universe::new("t", 100 + seed * 7919);
+                two_worlds(&mut u, 5.85, 4.25);
+                for _ in 0..3600 {
+                    u.update(1.0 / 60.0, 10.0, false);
+                }
+                has_moon(&u, "Earth")
+            })
+            .count();
+        assert!((6..24).contains(&moons), "{moons} of 24 glancing blows left a moon");
+    }
+
+    #[test]
+    fn theia_preset_leaves_the_earth_a_moon_at_any_speed() {
+        // The preset fixes its dice, so that this one does work every time: at any
+        // game speed, and with frames of uneven length like the real game's.
+        let uneven = Rng::new(5);
+        for (speed, steady) in [(1.0, true), (6.0, true), (40.0, true), (150.0, true), (2.0, false), (6.0, false), (30.0, false)] {
+            let mut u = Universe::new("t", speed as u64);
+            // (As in the game, the universe has been used before the preset is loaded.)
+            presets::build(&mut u, Preset::HeadOn);
+            for _ in 0..200 {
+                u.update(1.0 / 60.0, 4.0, false);
+            }
+            presets::build(&mut u, Preset::TheiaImpact);
+            while u.time < 600.0 {
+                u.update(if steady { 1.0 / 60.0 } else { uneven.range(0.01, 0.035) }, speed, false);
+            }
+            assert!(has_moon(&u, "Proto-Earth"), "no proper Moon at {speed}x (steady frames: {steady}): {:?}", u.log);
+            let e = u.bodies.iter().find(|b| b.name == "Proto-Earth").expect("the Proto-Earth should survive");
+            // Nobody puts it there: this is where gravity leaves what was torn off Theia.
+            let m = u.bodies.iter().find(|b| b.name == "Moon").unwrap_or_else(|| panic!("no Moon at {speed}x: {:?}", u.log));
+            let (r, v) = (m.pos - e.pos, m.vel - e.vel);
+            assert!(m.mass > 0.5, "at {speed}x the Moon is a pebble of {}", m.mass);
+            assert!(r.length() > e.radius + m.radius, "at {speed}x the Moon is in the ground");
+            assert!(v.length_squared() / 2.0 < u.g * (e.mass + m.mass) / r.length(), "at {speed}x the Moon is escaping");
+        }
+    }
+
+    #[test]
+    fn crowded_universe_stays_within_its_step_budget() {
+        let mut u = Universe::new("t", 16);
+        let s = u.new_body("S", BodyKind::Star, DVec3::ZERO, DVec3::ZERO).with_mass_radius(10000.0, 10.0);
+        u.add(s);
+        for k in 0..299 {
+            let (r, a) = (60.0 + k as f64 * 3.0, k as f64 * 2.4);
+            let v = (10000.0f64 / r).sqrt();
+            let b = u.new_body("", BodyKind::Asteroid, DVec3::new(r * a.cos(), 0.0, r * a.sin()), DVec3::new(-a.sin(), 0.0, a.cos()) * v).with_mass_radius(0.5, 0.5);
+            u.add(b);
+        }
+        u.pair_budget = 1_000_000;
+        u.update(1.0 / 60.0, 100.0, false);
+        assert!(u.step_work > 0 && u.step_work <= 1_000_000, "did {} pulls on a budget of a million", u.step_work);
+        // It can't keep up with 100x on that budget, so time runs slower rather than the frame longer.
+        assert!(u.time > 0.5 && u.time < 100.0 / 60.0, "simulated {} s", u.time);
+        assert!(u.bodies.iter().all(|b| b.pos.is_finite()));
     }
 
     #[test]

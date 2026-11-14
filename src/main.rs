@@ -17,6 +17,7 @@ mod gpu_types;
 mod icons;
 mod mesh;
 mod paint;
+mod population;
 mod presets;
 mod renderer;
 mod rocket;
@@ -255,6 +256,10 @@ impl State {
             Some(4096),
         );
         let mut game = Game::new();
+        // A third of a 60 fps frame for the physics. Screenshot runs keep the fixed budget so they repeat exactly.
+        if opts.screenshot.is_none() {
+            game.physics_budget = Some(0.006);
+        }
         game.settings = settings.clone();
         // Saves sit next to the settings file; automated runs neither read nor write them.
         game.saves.dir = if persist_settings { save::saves_dir() } else { None };

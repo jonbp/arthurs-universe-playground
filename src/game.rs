@@ -94,6 +94,13 @@ pub struct Game {
     pub preset: Preset,
     pub real_time: f64,
     pub fps: f32,
+    /// How long the physics may take each frame, in seconds. `None` (tests and
+    /// screenshot runs) leaves the fixed budget alone, so those stay repeatable.
+    pub physics_budget: Option<f64>,
+    /// Measured cost of one body-on-body pull on this computer, in seconds (smoothed).
+    pair_cost: f64,
+    /// How fast time is really running (it falls behind `time_scale` when the universe is too crowded to keep up).
+    pub actual_speed: f64,
     /// Sandbox, flying a rocket, or walking on a world (see `explore.rs`).
     pub mode: Mode,
     /// The rocket picked in the hangar (index into `rocket::ROCKETS`).
@@ -155,6 +162,9 @@ impl Game {
             preset: Preset::SolarSystem,
             real_time: 0.0,
             fps: 60.0,
+            physics_budget: None,
+            pair_cost: 0.0,
+            actual_speed: 1.0,
             mode: Mode::Sandbox,
             rocket: 0,
             keys: std::collections::HashSet::new(),
@@ -263,6 +273,11 @@ impl Game {
         self.mode_pre_sim(dt);
         let before = self.universe.time;
         self.universe.update(dt, self.time_scale, self.paused);
+        if !self.paused && dt > 0.0 {
+            let speed = (self.universe.time - before) / dt.min(0.1);
+            self.actual_speed += (speed - self.actual_speed) * 0.2;
+        }
+        self.tune_physics(self.universe.step_work, self.universe.step_seconds);
         self.mode_post_sim(dt, self.universe.time - before);
         if let Some(id) = self.selected {
             if self.universe.get(id).is_none() {
@@ -281,6 +296,22 @@ impl Game {
             self.paint_at(cam, dt as f32);
         }
         self.update_preview(cam, scene_has_pointer);
+    }
+
+    /// Keep the physics inside its share of a frame: from how long the last frame's
+    /// `work` (body-on-body pulls) took, set how many the universe may do next frame.
+    /// A slow computer, or a very crowded universe, then gets coarser steps and
+    /// finally slower time, never a stuttering picture.
+    pub(crate) fn tune_physics(&mut self, work: usize, seconds: f64) {
+        let Some(budget) = self.physics_budget else { return };
+        // Too little work to time reliably: keep what we know.
+        if work < 50_000 || seconds <= 0.0 {
+            return;
+        }
+        let cost = seconds / work as f64;
+        self.pair_cost = if self.pair_cost > 0.0 { self.pair_cost * 0.9 + cost * 0.1 } else { cost };
+        let pairs = (budget / self.pair_cost) as usize;
+        self.universe.pair_budget = pairs.clamp(crate::universe::MIN_PAIR_BUDGET, crate::universe::MAX_PAIR_BUDGET);
     }
 
     fn update_preview(&mut self, cam: &CameraFrame, scene_has_pointer: bool) {
@@ -794,6 +825,34 @@ mod tests {
         g.camera.distance = g.camera.desired_distance;
         let cam = g.camera.frame(1600.0, 1000.0);
         (g, cam)
+    }
+
+    #[test]
+    fn physics_budget_follows_the_speed_of_the_computer() {
+        use crate::universe::{MAX_PAIR_BUDGET, MIN_PAIR_BUDGET};
+        let mut g = Game::new();
+        // Tests and screenshots: no tuning, so every run is the same.
+        g.tune_physics(1_000_000, 0.010);
+        assert_eq!(g.universe.pair_budget, MAX_PAIR_BUDGET);
+        // A slow computer (10 ns a pull) with 6 ms to spend: 600,000 pulls a frame.
+        g.physics_budget = Some(0.006);
+        g.tune_physics(1_000_000, 0.010);
+        assert_eq!(g.universe.pair_budget, 600_000);
+        // A hiccup in one frame barely moves it; a tiny job is not timed at all.
+        g.tune_physics(1_000_000, 0.020);
+        assert!((500_000..600_000).contains(&g.universe.pair_budget));
+        let before = g.universe.pair_budget;
+        g.tune_physics(100, 1.0);
+        assert_eq!(g.universe.pair_budget, before);
+        // It never drops so low that the physics falls apart, nor goes above the old fixed budget.
+        for _ in 0..200 {
+            g.tune_physics(1_000_000, 1.0);
+        }
+        assert_eq!(g.universe.pair_budget, MIN_PAIR_BUDGET);
+        for _ in 0..200 {
+            g.tune_physics(1_000_000, 0.000_01);
+        }
+        assert_eq!(g.universe.pair_budget, MAX_PAIR_BUDGET);
     }
 
     fn click(g: &mut Game, cam: &CameraFrame, p: Vec2) {

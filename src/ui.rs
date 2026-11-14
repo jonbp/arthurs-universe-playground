@@ -791,7 +791,10 @@ fn time_bar(ctx: &egui::Context, game: &mut Game) {
                 game.time_scale = (game.time_scale * 2.0).min(1000.0);
             }
             ui.add_space(4.0);
-            let speed = chip(ui, None, &fmt_speed(game.time_scale), 64.0, true).on_hover_text("Simulation speed");
+            // Be honest when a crowded universe can't keep up with the speed asked for.
+            let behind = !game.paused && game.actual_speed < game.time_scale * 0.8;
+            let hint = if behind { format!("Simulation speed. There is so much going on that time is running at about {}", fmt_speed(game.actual_speed)) } else { "Simulation speed".to_string() };
+            let speed = chip(ui, None, &fmt_speed(game.time_scale), 64.0, true).on_hover_text(hint);
             Popup::from_toggle_button_response(&speed)
                 .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
                 .align(RectAlign::BOTTOM)
@@ -1320,6 +1323,25 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
             });
 
             hud::conditions_section(ui, &conditions);
+
+            // Who lives here, and how many there is room for.
+            if solid {
+                section(ui, "People");
+                let room = crate::population::capacity(&conditions, b);
+                let w = ((ui.available_width() - 6.0) / 2.0).floor();
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let crowded = b.population > room * 1.05;
+                    stat_cell(ui, "Living here", &crate::population::fmt_people(b.population), if crowded { DANGER } else { TEXT }, w);
+                    stat_cell(ui, "Room for", &crate::population::fmt_people(room), TEXT, w);
+                });
+                let slider = egui::Slider::new(&mut b.population, 0.0..=1.0e11)
+                    .logarithmic(true)
+                    .smallest_positive(1.0)
+                    .custom_formatter(|v, _| crate::population::fmt_people_short(v))
+                    .custom_parser(crate::population::parse_people);
+                slider_row(ui, "Population", slider);
+            }
 
             // Physical properties.
             section(ui, "Physical");

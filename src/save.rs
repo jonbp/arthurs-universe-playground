@@ -159,6 +159,7 @@ fn body_json(b: &Body) -> Value {
         "ghost": b.ghost,
         "supernova_timer": b.supernova_timer,
         "feeding": b.feeding,
+        "population": b.population,
     })
 }
 
@@ -199,6 +200,8 @@ fn body_from(v: &Value, rng: &mut crate::util::Rng) -> Option<(Body, Option<u32>
     b.ghost = f64_or(v, "ghost", 0.0);
     b.supernova_timer = num(v, "supernova_timer");
     b.feeding = f32_or(v, "feeding", b.feeding);
+    let people = f64_or(v, "population", 0.0);
+    b.population = if people.is_finite() { people.max(0.0) } else { 0.0 };
     let paint = v.get("paint").and_then(Value::as_u64).map(|l| l as u32);
     Some((b, paint))
 }
@@ -257,20 +260,32 @@ fn write_particles(ps: &[Particle], out: &mut Vec<u8>) {
     }
 }
 
+/// The mass each particle carries, written after the particles so that files
+/// from before dust had mass (which simply end there) still load.
+fn write_particle_masses(ps: &[Particle], out: &mut Vec<u8>) {
+    for p in ps {
+        out.extend_from_slice(&p.mass.to_le_bytes());
+    }
+}
+
 fn read_particles(r: &mut Reader, max: usize) -> Result<Vec<Particle>> {
     let n = r.u32()? as usize;
     if n.saturating_mul(PARTICLE_BYTES) > r.data.len() - r.at {
         bail!("save file is truncated");
     }
-    let mut out = Vec::with_capacity(n.min(max));
+    let mut all = Vec::with_capacity(n);
     for _ in 0..n {
-        let p = Particle { pos: r.vec3()?, vel: r.vec3()?, color: r.vec3()?, size: r.f32()?, life: r.f32()?, max_life: r.f32()?, flags: r.take(1)?[0] };
-        let finite = p.pos.is_finite() && p.vel.is_finite() && p.color.is_finite() && p.size.is_finite() && p.life.is_finite() && p.max_life.is_finite();
-        if finite && out.len() < max {
-            out.push(p);
+        all.push(Particle { pos: r.vec3()?, vel: r.vec3()?, color: r.vec3()?, size: r.f32()?, life: r.f32()?, max_life: r.f32()?, flags: r.take(1)?[0], mass: 0.0 });
+    }
+    // Newer files carry on with the mass of each particle; older ones end here.
+    if n > 0 && r.data.len() - r.at >= n * 4 {
+        for p in &mut all {
+            let m = r.f32()?;
+            p.mass = if m.is_finite() { m.max(0.0) } else { 0.0 };
         }
     }
-    Ok(out)
+    let finite = |p: &Particle| p.pos.is_finite() && p.vel.is_finite() && p.color.is_finite() && p.size.is_finite() && p.life.is_finite() && p.max_life.is_finite();
+    Ok(all.into_iter().filter(finite).take(max).collect())
 }
 
 fn rle_decode(r: &mut Reader) -> Result<Vec<[u8; 4]>> {
@@ -341,6 +356,7 @@ impl Game {
             rle_encode(&u.paint.layers[l as usize], &mut out);
         }
         write_particles(&u.particles, &mut out);
+        write_particle_masses(&u.particles, &mut out);
         out
     }
 
@@ -614,6 +630,40 @@ mod tests {
         // It still simulates.
         let cam = h.camera.frame(1600.0, 1000.0);
         h.update(1.0 / 60.0, &cam, false);
+    }
+
+    #[test]
+    fn dust_keeps_its_mass_through_a_save_and_old_saves_still_load() {
+        let mut g = Game::new();
+        g.load_preset(Preset::Empty);
+        for k in 0..10 {
+            g.universe.emit(DVec3::new(k as f64, 0.0, 0.0), DVec3::ZERO, glam::Vec3::ONE, 0.1, 50.0, 0);
+        }
+        g.universe.particles[3].mass = 0.25;
+        let bytes = g.save_bytes();
+        let mut h = Game::new();
+        h.load_bytes(&bytes).unwrap();
+        assert_eq!(h.universe.particles.len(), 10);
+        assert_eq!(h.universe.particles[3].mass, 0.25);
+        assert_eq!(h.universe.particles[4].mass, 0.0);
+        // A file from before dust had mass ends right after the particles.
+        let old = &bytes[..bytes.len() - 10 * 4];
+        let mut h = Game::new();
+        h.load_bytes(old).unwrap();
+        assert_eq!(h.universe.particles.len(), 10);
+        assert!(h.universe.particles.iter().all(|p| p.mass == 0.0));
+    }
+
+    #[test]
+    fn populations_survive_a_save() {
+        let mut g = Game::new();
+        g.load_preset(Preset::SolarSystem);
+        let people = |g: &Game, name: &str| g.universe.bodies.iter().find(|b| b.name == name).unwrap().population;
+        assert!(people(&g, "Earth") > 1.0e9);
+        let mut h = Game::new();
+        h.load_bytes(&g.save_bytes()).unwrap();
+        assert_eq!(people(&h, "Earth"), people(&g, "Earth"));
+        assert_eq!(people(&h, "Mars"), 0.0);
     }
 
     #[test]

@@ -132,6 +132,15 @@ fn asteroid_belt(u: &mut Universe, center: DVec3, center_vel: DVec3, mass: f64, 
 }
 
 pub fn build(u: &mut Universe, preset: Preset) {
+    build_bodies(u, preset);
+    // People start out wherever it is just right for them. (Not on the young Earth
+    // that Theia is about to hit: nobody lives there yet.)
+    if preset != Preset::TheiaImpact {
+        crate::population::settle(u);
+    }
+}
+
+fn build_bodies(u: &mut Universe, preset: Preset) {
     u.reset(preset.label());
     u.g = 1.0;
     match preset {
@@ -269,15 +278,31 @@ fn theia(u: &mut Universe) {
     earth.surface.clouds = 0.5;
     earth.surface.sea_level = -0.2;
     let earth_id = u.add(earth);
-    let mut theia = u.new_body("Theia", BodyKind::Desert, DVec3::new(32.0, 0.5, 4.5), DVec3::new(-11.0, 0.0, 0.0)).with_mass_radius(14.0, 1.7);
+    // Like the real one: Theia drifts in slowly and strikes at about 45 degrees, at not
+    // much more than escape speed. Faster, and what is left of it would fly off; more
+    // head-on, and it would all sink in. This way part of it is caught in orbit.
+    let mut theia = u.new_body("Theia", BodyKind::Desert, DVec3::new(32.0, 0.5, 5.85), DVec3::new(-4.25, 0.0, 0.0)).with_mass_radius(14.0, 1.7);
     theia.surface.colors = [Vec3::new(0.5, 0.35, 0.3), Vec3::new(0.3, 0.2, 0.15), Vec3::ONE];
     u.add(theia);
     // The sun is far away and very massive: keep it from pulling the pair apart by making it static-ish.
     if let Some(s) = u.get_mut(sun_id) {
         s.mass = 50.0; // a distant lamp; real gravity would dominate the scene
     }
+    // Put the pair's shared centre of mass at rest in the middle of the view, so the
+    // wreckage (and the moon that forms in it) stays on screen instead of drifting off.
+    let pair: Vec<usize> = u.bodies.iter().enumerate().filter(|(_, b)| b.id != sun_id).map(|(i, _)| i).collect();
+    let mass: f64 = pair.iter().map(|&i| u.bodies[i].mass).sum();
+    let centre = pair.iter().map(|&i| u.bodies[i].pos * u.bodies[i].mass).sum::<DVec3>() / mass;
+    let drift = pair.iter().map(|&i| u.bodies[i].vel * u.bodies[i].mass).sum::<DVec3>() / mass;
+    for i in pair {
+        u.bodies[i].pos -= centre;
+        u.bodies[i].vel -= drift;
+    }
+    // How the pieces fly when Theia is torn is partly chance, and only some throws
+    // leave a moon. This is the story of the one that did, so the dice are fixed.
+    u.rng = Rng::new(17);
     let _ = earth_id;
-    u.event("Theia is on a collision course with the Proto-Earth. Watch the debris form a ring - maybe a Moon!");
+    u.event("Theia is drifting towards the Proto-Earth. Watch what happens to the part of it that misses!");
 }
 
 fn head_on(u: &mut Universe) {
@@ -538,6 +563,11 @@ fn random_name(rng: &mut Rng) -> String {
 }
 
 pub fn build_custom(u: &mut Universe, p: &CustomParams) {
+    build_custom_bodies(u, p);
+    crate::population::settle(u);
+}
+
+fn build_custom_bodies(u: &mut Universe, p: &CustomParams) {
     u.reset(&p.name);
     u.g = p.gravity;
     u.rng = Rng::new(p.seed);

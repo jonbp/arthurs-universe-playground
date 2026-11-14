@@ -236,6 +236,8 @@ pub struct Body {
     pub supernova_timer: Option<f64>,
     /// Accretion disk brightness for black holes.
     pub feeding: f32,
+    /// How many people live here (see `population.rs`).
+    pub population: f64,
     pub alive: bool,
 }
 
@@ -268,6 +270,7 @@ impl Body {
             heat: 0.0,
             supernova_timer: None,
             feeding: if kind == BodyKind::BlackHole { 0.5 } else { 0.0 },
+            population: 0.0,
             alive: true,
         }
     }
