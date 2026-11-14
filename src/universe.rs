@@ -147,7 +147,7 @@ struct Probe {
 const MIN_FRAGMENT_RADIUS: f64 = 0.12;
 
 /// Particles are integrated on several threads above this many per thread.
-const PARTICLES_PER_THREAD: usize = 16_384;
+const PARTICLES_PER_THREAD: usize = 8_192;
 const MAX_ATTRACTORS: usize = 16;
 
 #[derive(Clone, Copy)]
@@ -1150,14 +1150,15 @@ impl Universe {
             .iter()
             .map(|&i| {
                 let b = &self.bodies[i];
-                Attractor { pos: b.pos.as_vec3(), gm: (b.mass * self.g) as f32, r2: (b.radius * b.radius) as f32 }
+                Attractor { pos: b.pos.as_vec3(), vel: b.vel.as_vec3(), gm: (b.mass * self.g) as f32, r2: (b.radius * b.radius) as f32 }
             })
             .collect();
-        let sub = ((dt / 0.02).ceil() as usize).clamp(1, 8);
         let n = self.particles.len();
+        // Big clouds get fewer steps each, so the frame rate holds up.
+        let max_steps = ((PARTICLE_WORK / (n * attractors.len().max(1)).max(1)) as u32).clamp(8, PARTICLE_MAX_STEPS);
         let threads = if n >= 2 * PARTICLES_PER_THREAD { worker_threads().min(n / PARTICLES_PER_THREAD) } else { 1 };
         let fed = if threads <= 1 {
-            integrate_particles(&mut self.particles, &attractors, sub, dt)
+            integrate_particles(&mut self.particles, &attractors, dt, max_steps)
         } else {
             // Particles don't interact with each other, so chunks are independent
             // and the result is identical to the single-threaded one.
@@ -1165,7 +1166,7 @@ impl Universe {
             let attractors = &attractors[..];
             std::thread::scope(|scope| {
                 let workers: Vec<_> =
-                    self.particles.chunks_mut(chunk).map(|c| scope.spawn(move || integrate_particles(c, attractors, sub, dt))).collect();
+                    self.particles.chunks_mut(chunk).map(|c| scope.spawn(move || integrate_particles(c, attractors, dt, max_steps))).collect();
                 let mut fed = [0u32; MAX_ATTRACTORS];
                 for w in workers {
                     let part = w.join().expect("particle worker panicked");
@@ -1288,7 +1289,9 @@ impl Universe {
 
 #[derive(Clone, Copy)]
 struct Attractor {
+    /// Where it is at the end of the frame, and how fast it is moving.
     pos: Vec3,
+    vel: Vec3,
     gm: f32,
     /// Radius squared: particles inside are absorbed.
     r2: f32,
@@ -1299,18 +1302,37 @@ fn worker_threads() -> usize {
     *N.get_or_init(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8))
 }
 
-/// Advance a slice of particles by `dt` in `sub` sub-steps. Returns how many
-/// particles each attractor swallowed.
-fn integrate_particles(particles: &mut [Particle], attractors: &[Attractor], sub: usize, dt: f32) -> [u32; MAX_ATTRACTORS] {
-    let h = dt / sub as f32;
-    let drag = (-0.12 * h).exp();
+/// The longest step a particle takes while it is cheap to take short ones (slow game speeds).
+const PARTICLE_STEP: f32 = 0.02;
+/// At faster game speeds a particle's step is this fraction of its orbital timescale
+/// (about a hundred steps per orbit), so dust close to a heavy body takes many short
+/// steps and far-off dust a few long ones.
+const PARTICLE_ORBIT_FRACTION: f32 = 0.06;
+/// ...but never more than this many steps in one frame,
+const PARTICLE_MAX_STEPS: u32 = 48;
+/// and fewer when there is a lot of dust: about this many particle-attractor pulls a frame.
+const PARTICLE_WORK: usize = 2_500_000;
+
+/// Advance a slice of particles by `dt`. Returns how many particles each attractor swallowed.
+///
+/// Each particle picks its own step length as it goes. One fixed step for all of
+/// them made galaxies and accretion disks fly apart when time was sped up: the dust
+/// nearest the centre was taking only a handful of steps per orbit.
+fn integrate_particles(particles: &mut [Particle], attractors: &[Attractor], dt: f32, max_steps: u32) -> [u32; MAX_ATTRACTORS] {
+    const DRAG: f32 = 0.12;
     let mut fed = [0u32; MAX_ATTRACTORS];
     for p in particles {
-        'steps: for _ in 0..sub {
-            if p.flags & P_GRAVITY != 0 {
+        if p.flags & P_GRAVITY != 0 {
+            // Time still to cover this frame, and the steps left to do it in.
+            let mut left = dt;
+            let mut steps_left = max_steps;
+            'steps: while left > 0.0 {
                 let mut acc = Vec3::ZERO;
+                // Strongest G*mass / distance^3 felt: the square of the orbital rate.
+                let mut grip = 0.0f32;
                 for (k, a) in attractors.iter().enumerate() {
-                    let d = a.pos - p.pos;
+                    // The attractor moves during the frame too: use where it is right now.
+                    let d = a.pos - a.vel * left - p.pos;
                     let d2 = d.length_squared();
                     if d2 < a.r2 {
                         // Swallowed: count it once and stop integrating it.
@@ -1319,14 +1341,33 @@ fn integrate_particles(particles: &mut [Particle], attractors: &[Attractor], sub
                         break 'steps;
                     }
                     let s = d2 + 0.05;
-                    acc += d * (a.gm / (s * s.sqrt()));
+                    let w = a.gm / (s * s.sqrt());
+                    acc += d * w;
+                    grip = grip.max(w);
                 }
+                let h = if left <= PARTICLE_STEP || grip <= 0.0 {
+                    left
+                } else {
+                    // Split what is left of the frame into equal steps no longer than the
+                    // ideal: a steady orbit then gets the same step every time, which keeps it steady.
+                    let ideal = (PARTICLE_ORBIT_FRACTION / grip.sqrt()).max(PARTICLE_STEP);
+                    left / (left / ideal).ceil().clamp(1.0, steps_left as f32)
+                };
                 p.vel += acc * h;
+                if p.flags & P_DRAG != 0 {
+                    p.vel *= (-DRAG * h).exp();
+                }
+                p.pos += p.vel * h;
+                left -= h;
+                steps_left = steps_left.saturating_sub(1).max(1);
             }
-            if p.flags & P_DRAG != 0 {
-                p.vel *= drag;
-            }
-            p.pos += p.vel * h;
+        } else if p.flags & P_DRAG != 0 {
+            // Coasting to a stop: the exact answer in one go.
+            let slowed = (-DRAG * dt).exp();
+            p.pos += p.vel * ((1.0 - slowed) / DRAG);
+            p.vel *= slowed;
+        } else {
+            p.pos += p.vel * dt;
         }
         if p.flags & P_IMMORTAL == 0 {
             p.life -= dt;
@@ -1468,8 +1509,8 @@ mod tests {
     #[test]
     fn particles_integrate_identically_on_many_threads() {
         let attractors = [
-            Attractor { pos: Vec3::ZERO, gm: 5000.0, r2: 4.0 },
-            Attractor { pos: Vec3::new(60.0, 0.0, 0.0), gm: 800.0, r2: 1.0 },
+            Attractor { pos: Vec3::ZERO, vel: Vec3::ZERO, gm: 5000.0, r2: 4.0 },
+            Attractor { pos: Vec3::new(60.0, 0.0, 0.0), vel: Vec3::ZERO, gm: 800.0, r2: 1.0 },
         ];
         let rng = Rng::new(11);
         let make = || -> Vec<Particle> {
@@ -1492,7 +1533,7 @@ mod tests {
         u.add(b);
         u.particles = make();
         let mut reference = u.particles.clone();
-        let fed = integrate_particles(&mut reference, &attractors, 3, 0.05);
+        let fed = integrate_particles(&mut reference, &attractors, 0.05, PARTICLE_MAX_STEPS);
         reference.retain(|p| p.life > 0.0);
         assert!(fed[0] > 0, "expected some particles to fall into the hole");
         u.update_particles(0.05);
@@ -1592,6 +1633,28 @@ mod tests {
         let b = u.get(id).unwrap();
         // It swallows 30% of the victim: 12 units of mass moving at 20.
         assert!((b.vel.z * b.mass - 240.0).abs() < 1.0, "sideways momentum {}", b.vel.z * b.mass);
+    }
+
+    #[test]
+    fn dust_orbits_survive_fast_forward() {
+        // A ring of dust close to a star, watched at 100x speed for many orbits.
+        let mut u = Universe::new("t", 6);
+        let s = u.new_body("Star", BodyKind::Star, DVec3::ZERO, DVec3::ZERO).with_mass_radius(10000.0, 5.0);
+        u.add(s);
+        let r = 15.0;
+        for k in 0..100 {
+            let a = k as f64 / 100.0 * std::f64::consts::TAU;
+            let v = (10000.0f64 / r).sqrt();
+            u.emit(DVec3::new(a.cos(), 0.0, a.sin()) * r, DVec3::new(-a.sin(), 0.0, a.cos()) * v, Vec3::ONE, 0.1, 1.0, P_GRAVITY | P_IMMORTAL);
+        }
+        for _ in 0..360 {
+            u.update(1.0 / 60.0, 100.0, false);
+        }
+        assert_eq!(u.particles.len(), 100);
+        for p in &u.particles {
+            let d = p.pos.length() as f64;
+            assert!((d / r - 1.0).abs() < 0.05, "dust wandered from radius {r} to {d:.1}");
+        }
     }
 
     #[test]
