@@ -470,6 +470,7 @@ impl Universe {
         let tidal = self.tidal_disruption && self.bodies.iter().any(|b| b.kind == BodyKind::BlackHole);
         let bodies = &self.bodies;
         let contacts = &mut self.contacts;
+        let pass_through = self.collisions == CollisionMode::PassThrough;
         let probes = &self.scratch_probes[..];
         for i in 0..n {
             let pi = probes[i];
@@ -487,7 +488,9 @@ impl Universe {
                 if d2 < rsum * rsum {
                     let j = i + 1 + k;
                     let (bi, bj) = (&bodies[i], &bodies[j]);
-                    let ghosted = (bi.ghost > 0.0 || bj.ghost > 0.0) && !bi.kind.is_stellar() && !bj.kind.is_stellar();
+                    // Fresh fragments pass through other worlds for a moment, and in ghost
+                    // mode all worlds do; stars and black holes always swallow.
+                    let ghosted = (pass_through || bi.ghost > 0.0 || bj.ghost > 0.0) && !bi.kind.is_stellar() && !bj.kind.is_stellar();
                     if !ghosted {
                         contacts.push(Contact::Touch(i, j));
                     }
