@@ -8,7 +8,7 @@ The project is fully vibe coded (the README says so). Every change is made by an
 
 ```sh
 cargo build --release          # always test and run release builds; debug is slow
-cargo test --release           # ~72 tests, ~30 s; CI runs `--locked`
+cargo test --release           # ~78 tests, ~30 s; CI runs `--locked`
 ./target/release/arthurs-universe-playground
 ```
 

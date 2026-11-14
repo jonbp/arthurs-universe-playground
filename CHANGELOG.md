@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-11-14
+
+### Changed
+
+- **Galaxies, rings and dust clouds hold together when you speed up time.** At 100x and faster the dust nearest a star or black hole used to be flung away; each speck now takes as many small steps as its orbit needs.
+- When two worlds merge, the new world appears at the balance point between them rather than where the bigger one was.
+
+### Fixed
+
+- **A planet smash could fill the universe with rubble.** Now and then the fragments kept shattering into more and more weightless rocks, which slowed the game to a crawl. Small pieces now grind down to dust instead.
+- The wreckage of a smash no longer drifts off sideways: it carries on the way the two worlds were heading.
+- A black hole that tears a world apart is nudged by what it swallows.
+- Ghost mode no longer slows the game while worlds overlap.
+
 ## [1.3.1] - 2026-11-14
 
 ### Added
@@ -114,7 +128,8 @@ First public release.
 - Ten presets, including Theia Impact, Black Hole Feast, Supernova Countdown and Galaxy Collision.
 - Downloadable builds for Windows (x64), macOS (Apple Silicon, MoltenVK bundled) and Linux (x86_64), all with the app icon.
 
-[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.3.2...HEAD
+[1.3.2]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.1...v1.2.2
