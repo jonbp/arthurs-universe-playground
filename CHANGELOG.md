@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-14
+
 ### Fixed
 
 - Clicking a panel button no longer also clicks "through" it into the scene, which could deselect the current body or fire a projectile at whatever was behind the panel.
@@ -39,5 +41,6 @@ First public release.
 - Ten presets, including Theia Impact, Black Hole Feast, Supernova Countdown and Galaxy Collision.
 - Downloadable builds for Windows (x64), macOS (Apple Silicon, MoltenVK bundled) and Linux (x86_64), all with the app icon.
 
-[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jonbp/arthurs-universe-playground/releases/tag/v1.0.0
