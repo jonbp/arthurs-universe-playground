@@ -4,6 +4,10 @@
 
 # 🌍 Arthur's Universe Playground
 
+> **A fully vibe-coded project.** Every line of code, shader, test and doc here was written by an AI coding assistant from plain-language requests, as a test of how far vibe coding can go.
+
+![The Solar System, with Earth selected in the inspector](docs/screenshots/solar-system.jpg)
+
 A space sandbox written in **Rust + Vulkan**. Start with the Solar System, then:
 
 - **Terraform planets.** Paint continents, dig oceans, and add lava, ice, forests, sand or craters directly onto planet surfaces.
@@ -19,6 +23,17 @@ A space sandbox written in **Rust + Vulkan**. Start with the Solar System, then:
   - **Black holes:** accretion disks with Doppler beaming, gravitational lensing, and tidal disruption ("spaghettification").
   - **Supernovae:** a blast wave that pushes and scorches planets, an expanding nebula, and a neutron-star or black-hole remnant.
   - **Stellar mergers, black-hole mergers and galaxy collisions** with tidal tails.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![A supermassive black hole bending the light of its accretion disk](docs/screenshots/black-hole.jpg) | ![Two galaxies colliding, throwing out tidal tails](docs/screenshots/galaxy-collision.jpg) |
+| **Black hole:** lensing, a Doppler-beamed accretion disk and a photon ring | **Galaxy collision:** tens of thousands of stars and their tidal tails |
+| ![A rocket lifting off from Earth, with the flight panel below](docs/screenshots/flying.jpg) | ![Standing on Mars, with Phobos overhead and the conditions there](docs/screenshots/walking.jpg) |
+| **Flying:** lift off from any solid world under real gravity | **Walking:** stand on Mars and see what it's like there |
+| ![A blue supergiant's supernova blast wave](docs/screenshots/supernova.jpg) | |
+| **Supernova:** the blast wave, with a neutron star left behind | |
 
 ## Download
 
