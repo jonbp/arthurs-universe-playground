@@ -87,10 +87,13 @@ pub enum Icon {
     // Saves and sound
     Save,
     Folder,
+    Speaker,
+    SpeakerOff,
+    Music,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 71] = [
+    pub const ALL: [Icon; 74] = [
         Icon::Cursor,
         Icon::SpawnPlanet,
         Icon::Brush,
@@ -162,6 +165,9 @@ impl Icon {
         Icon::Seat,
         Icon::Save,
         Icon::Folder,
+        Icon::Speaker,
+        Icon::SpeakerOff,
+        Icon::Music,
     ];
 
     pub fn name(self) -> String {
@@ -821,6 +827,23 @@ fn draw(icon: Icon, p: &Pen) {
         Folder => {
             p.closed(&[(3.0, 6.0), (3.0, 19.0), (21.0, 19.0), (21.0, 8.5), (11.5, 8.5), (9.5, 6.0)]);
             p.line(&[(3.0, 11.0), (21.0, 11.0)]);
+        }
+        Speaker => {
+            p.closed(&[(3.5, 9.5), (7.5, 9.5), (12.5, 5.0), (12.5, 19.0), (7.5, 14.5), (3.5, 14.5)]);
+            p.arc((12.5, 12.0), 4.0, -45.0, 45.0);
+            p.arc((12.5, 12.0), 8.0, -45.0, 45.0);
+        }
+        SpeakerOff => {
+            p.closed(&[(3.5, 9.5), (7.5, 9.5), (12.5, 5.0), (12.5, 19.0), (7.5, 14.5), (3.5, 14.5)]);
+            p.line(&[(16.0, 9.5), (21.0, 14.5)]);
+            p.line(&[(21.0, 9.5), (16.0, 14.5)]);
+        }
+        Music => {
+            // Two quavers joined by a beam.
+            p.line(&[(9.0, 17.5), (9.0, 5.5), (20.0, 3.5), (20.0, 15.5)]);
+            p.line(&[(9.0, 9.5), (20.0, 7.5)]);
+            p.circle((6.5, 17.5), 2.5);
+            p.circle((17.5, 15.5), 2.5);
         }
     }
 }

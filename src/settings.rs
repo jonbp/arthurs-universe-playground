@@ -71,6 +71,11 @@ pub struct Settings {
     pub ui_scale: f32,
     pub labels: bool,
     pub show_stats: bool,
+    // Sound (each 0..1)
+    pub master_volume: f32,
+    pub effects_volume: f32,
+    pub music_volume: f32,
+    pub muted: bool,
     // Gameplay
     /// Forgiving rocket flight: endless fuel, an engine strong enough for any world,
     /// soft landings at any speed and self-levelling steering.
@@ -93,6 +98,10 @@ impl Default for Settings {
             ui_scale: 1.0,
             labels: true,
             show_stats: true,
+            master_volume: 0.8,
+            effects_volume: 0.8,
+            music_volume: 0.5,
+            muted: false,
             easy_flying: false,
         }
     }
@@ -109,6 +118,9 @@ impl Settings {
         self.bloom = fix(self.bloom, 0.0, 2.0, d.bloom);
         self.stars = fix(self.stars, 0.0, 2.0, d.stars);
         self.fps_limit = self.fps_limit.min(1000);
+        self.master_volume = fix(self.master_volume, 0.0, 1.0, d.master_volume);
+        self.effects_volume = fix(self.effects_volume, 0.0, 1.0, d.effects_volume);
+        self.music_volume = fix(self.music_volume, 0.0, 1.0, d.music_volume);
     }
 
     pub fn to_json(&self) -> Value {
@@ -128,6 +140,10 @@ impl Settings {
             "ui_scale": r(self.ui_scale),
             "labels": self.labels,
             "show_stats": self.show_stats,
+            "master_volume": r(self.master_volume),
+            "effects_volume": r(self.effects_volume),
+            "music_volume": r(self.music_volume),
+            "muted": self.muted,
             "easy_flying": self.easy_flying,
         })
     }
@@ -163,6 +179,10 @@ impl Settings {
         f("ui_scale", &mut s.ui_scale);
         b("labels", &mut s.labels);
         b("show_stats", &mut s.show_stats);
+        f("master_volume", &mut s.master_volume);
+        f("effects_volume", &mut s.effects_volume);
+        f("music_volume", &mut s.music_volume);
+        b("muted", &mut s.muted);
         b("easy_flying", &mut s.easy_flying);
         s.sanitize();
         s
@@ -233,6 +253,10 @@ mod tests {
             ui_scale: 1.25,
             labels: false,
             show_stats: false,
+            master_volume: 0.25,
+            effects_volume: 0.5,
+            music_volume: 0.0,
+            muted: true,
             easy_flying: true,
         };
         assert_eq!(Settings::from_json(&s.to_json()), s);

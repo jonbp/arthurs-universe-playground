@@ -24,6 +24,42 @@ pub struct Particle {
     pub flags: u8,
 }
 
+/// Something worth hearing. The UI layer drains these each frame and plays them,
+/// louder the bigger they are and the closer they are to the camera.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Sound {
+    /// A small body falls into a bigger one.
+    Thud,
+    /// Worlds smash each other to pieces.
+    Smash,
+    /// Two stars merge.
+    StarMerge,
+    /// Two black holes merge.
+    BlackHoleMerge,
+    Supernova,
+    /// The rocket is wrecked.
+    Crash,
+    LiftOff,
+    Land,
+    /// A new body appears.
+    Pop,
+    /// A projectile is hurled.
+    Whoosh,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SoundEvent {
+    pub sound: Sound,
+    /// Where it happened (None: right here, e.g. your own rocket).
+    pub pos: Option<DVec3>,
+    /// Rough size in world units: bigger events carry further.
+    pub size: f32,
+}
+
+/// Pending sounds are capped so a universe that is never listened to (tests,
+/// screenshots) doesn't grow the queue without bound.
+const MAX_PENDING_SOUNDS: usize = 64;
+
 /// A transient point light + glow (impacts, explosions).
 #[derive(Clone)]
 pub struct Flash {
@@ -135,6 +171,8 @@ pub struct Universe {
     pub log: Vec<String>,
     /// The rocket being flown, if any (see `explore.rs`).
     pub ship: Option<Ship>,
+    /// Sounds since the UI last took them (see [`Sound`]).
+    pub sounds: Vec<SoundEvent>,
     next_id: u64,
     contacts: Vec<Contact>,
     scratch_probes: Vec<Probe>,
@@ -162,6 +200,7 @@ impl Universe {
             rng: Rng::new(seed),
             log: Vec::new(),
             ship: None,
+            sounds: Vec::new(),
             next_id: 1,
             contacts: Vec::new(),
             scratch_probes: Vec::new(),
@@ -179,6 +218,7 @@ impl Universe {
         self.time = 0.0;
         self.log.clear();
         self.ship = None;
+        self.sounds.clear();
         self.contacts.clear();
         self.paint.reset_all();
     }
@@ -210,6 +250,12 @@ impl Universe {
 
     pub fn get_mut(&mut self, id: u64) -> Option<&mut Body> {
         self.bodies.iter_mut().find(|b| b.id == id && b.alive)
+    }
+
+    pub fn sound(&mut self, sound: Sound, pos: Option<DVec3>, size: f32) {
+        if self.sounds.len() < MAX_PENDING_SOUNDS {
+            self.sounds.push(SoundEvent { sound, pos, size });
+        }
     }
 
     pub fn event(&mut self, msg: impl Into<String>) {
@@ -648,6 +694,7 @@ impl Universe {
                     P_GRAVITY | P_HOT,
                 );
             }
+            self.sound(Sound::Thud, Some(impact), s.radius as f32);
             self.flashes.push(Flash {
                 pos: impact,
                 color: Vec3::new(1.0, 0.75, 0.45),
@@ -739,6 +786,7 @@ impl Universe {
                 P_GRAVITY | if roll < 0.35 { P_HOT } else { 0 },
             );
         }
+        self.sound(Sound::Smash, Some(impact), (s.radius + b.radius) as f32);
         self.flashes.push(Flash {
             pos: impact,
             color: Vec3::new(1.0, 0.8, 0.55),
@@ -823,6 +871,7 @@ impl Universe {
             self.emit(pos + dir * r, vel + dir * self.rng.range(5.0, 25.0), c, self.rng.rangef(0.3, 1.2), self.rng.rangef(4.0, 12.0), P_HOT | P_DRAG);
         }
         self.flashes.push(Flash { pos, color: Vec3::new(1.0, 0.9, 0.8), intensity: 15.0, decay: 0.6, size: (r * 20.0) as f32 });
+        self.sound(Sound::StarMerge, Some(pos), (r * 4.0) as f32);
     }
 
     fn merge_black_holes(&mut self, big: usize, small: usize) {
@@ -849,6 +898,7 @@ impl Universe {
             }
         }
         self.flashes.push(Flash { pos, color: Vec3::new(0.7, 0.75, 1.0), intensity: 10.0, decay: 0.8, size: (r * 30.0) as f32 });
+        self.sound(Sound::BlackHoleMerge, Some(pos), (r * 6.0) as f32);
     }
 
     /// Tidal disruption: a body passing too close to a black hole is torn into a stream.
@@ -970,6 +1020,7 @@ impl Universe {
             self.emit(s.pos + dir * s.radius, s.vel + dir * self.rng.range(90.0, 130.0), Vec3::new(0.9, 0.95, 1.0) * 2.0, 0.9, self.rng.rangef(2.0, 4.0), 0);
         }
         self.flashes.push(Flash { pos: s.pos, color: Vec3::new(0.85, 0.9, 1.0), intensity: 30.0, decay: 0.7, size: (s.radius * 14.0) as f32 });
+        self.sound(Sound::Supernova, Some(s.pos), (s.radius * 20.0) as f32);
         self.shockwaves.push(Shockwave {
             center: s.pos,
             radius: s.radius,

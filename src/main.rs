@@ -21,6 +21,7 @@ mod presets;
 mod renderer;
 mod rocket;
 mod scene;
+mod audio;
 mod save;
 mod settings;
 mod terrain;
@@ -178,6 +179,7 @@ struct State {
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     game: Game,
+    sound: audio::SoundBridge,
     frame_data: gpu_types::FrameData,
     extras: explore::SceneExtras,
     last: Instant,
@@ -342,6 +344,8 @@ impl State {
             egui_ctx,
             egui_state,
             game,
+            // No sound for automated screenshot runs.
+            sound: audio::SoundBridge::new(if opts.screenshot.is_some() { None } else { audio::Audio::start() }),
             frame_data: gpu_types::FrameData::new(),
             extras: explore::SceneExtras::default(),
             last: Instant::now(),
@@ -460,6 +464,8 @@ impl State {
         let scene_has_pointer = !self.egui_ctx.egui_wants_pointer_input() && !self.egui_ctx.is_pointer_over_egui();
         self.game.track_spawn_drag(&cam);
         self.game.update(dt, &cam, scene_has_pointer);
+        let ui_clicked = !scene_has_pointer && self.egui_ctx.input(|i| i.pointer.primary_clicked());
+        self.sound.update(&mut self.game, &cam, dt, ui_clicked);
 
         let cam = self.game.view_frame(w, h);
         self.game.scene_extras(&cam, &mut self.extras);

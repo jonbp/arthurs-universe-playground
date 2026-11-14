@@ -43,6 +43,10 @@ jobs:
           [ "v$VERSION" = "$TAG" ] || { echo "::error::Tag $TAG does not match Cargo.toml version $VERSION"; exit 1; }
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
+      - name: Install ALSA headers (sound)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
       - name: Test
         run: cargo test --release --locked
 

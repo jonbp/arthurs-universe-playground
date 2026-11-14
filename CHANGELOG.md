@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Save your universes.** In the universe menu, **Saved universes…** lets you save the current universe under a name and load or delete saves. A save keeps every body and its orbit, painted terrain, rings, the stars of a galaxy, physics settings, the camera and the time speed. Saving a name that already exists replaces it, and deleting needs a second click to confirm.
 - **Continue where you left off.** The game saves automatically when you close it (and every 3 minutes while you play). **Continue where you left off** in the universe menu brings that back.
+- **Sound.** Impacts, smashes, star and black-hole mergers, supernovae, rocket lift-off, landing and crashes, the engine roar following the throttle, footsteps, new planets popping in, projectiles whooshing and soft button clicks. Effects get quieter with distance and are panned to where they happen. Everything is synthesized live; there are no audio files.
+- **Music.** A calm ambient soundtrack that drifts between four chords with bell notes on top and never repeats exactly.
+- **Sound settings.** Mute (`M`, or the new speaker button in the top-right bar), plus overall, effects and music volume in Settings. Easy flying can now also be switched on in Settings under Gameplay.
+
+### Changed
+
+- Linux builds need the ALSA development headers (`libasound2-dev`), and the game uses `libasound2` at run time for sound.
 
 ## [1.2.2] - 2026-11-14
 

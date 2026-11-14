@@ -19,7 +19,7 @@ use crate::gpu_types::{GpuParticle, LineVertex};
 use crate::rocket::{self, RocketSpec, ROCKETS};
 use crate::scene::Polyline;
 use crate::terrain;
-use crate::universe::{Flash, Ship, ShipHit, Universe, P_GRAVITY, P_HOT};
+use crate::universe::{Flash, Ship, ShipHit, Sound, Universe, P_GRAVITY, P_HOT};
 
 /// Height of the astronaut's eyes above the ground, in world units.
 pub const EYE_HEIGHT: f64 = 0.012;
@@ -331,6 +331,7 @@ impl Flight {
                         let mut ship = Ship::new(self.pos, self.vel, self.radius());
                         ship.thrust = up * accel * self.throttle;
                         u.ship = Some(ship);
+                        u.sound(Sound::LiftOff, None, 1.0);
                         u.event(format!("{} lifted off from {}", spec.name, b.name));
                     } else if self.throttle > 0.98 {
                         self.grounded_by_gravity = true;
@@ -403,6 +404,7 @@ impl Flight {
                 self.throttle = 0.0;
                 self.sit_on(u, &b, local);
                 u.ship = None;
+                u.sound(Sound::Land, None, (hit.speed as f32 / spec.max_landing_speed as f32).clamp(0.2, 1.0));
                 u.event(format!("{} landed on {name} (touchdown speed {:.1})", spec.name, hit.speed));
             }
             Some(reason) => {
@@ -416,6 +418,7 @@ impl Flight {
                     u.emit(self.pos, v, c, size * u.rng.rangef(0.08, 0.35), u.rng.rangef(0.4, 2.5), P_HOT | P_GRAVITY);
                 }
                 u.flashes.push(Flash { pos: self.pos, color: Vec3::new(1.0, 0.7, 0.4), intensity: 1.5, decay: 2.0, size: size * 25.0 });
+                u.sound(Sound::Crash, None, 1.0);
                 if terrain::has_solid_surface(kind) {
                     let angular = (spec.length * 1.2 / u.bodies[i].radius).clamp(0.015, 0.25) as f32;
                     u.crater(i, hit.normal, angular, 0.0);
@@ -946,6 +949,23 @@ impl Game {
             safe_landing_speed: if easy { f64::INFINITY } else { spec.max_landing_speed },
             easy,
         })
+    }
+
+    /// How hard the rocket engine is firing right now (0 = silent), for the engine sound.
+    pub fn engine_level(&self) -> f32 {
+        match &self.mode {
+            Mode::Flight(f) if f.burning() => f.throttle as f32,
+            _ => 0.0,
+        }
+    }
+
+    /// Seconds between footsteps while walking on the ground, or None when standing still,
+    /// in mid-air or not walking at all.
+    pub fn footstep_interval(&self) -> Option<f64> {
+        let Mode::Walk(w) = &self.mode else { return None };
+        let c = self.controls();
+        let moving = c.forward != 0.0 || c.strafe != 0.0;
+        (moving && w.height <= 0.0).then_some(if c.run { 0.28 } else { 0.45 })
     }
 
     pub fn walk_info(&self) -> Option<WalkInfo> {

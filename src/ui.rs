@@ -800,7 +800,12 @@ fn view_bar(ctx: &egui::Context, game: &mut Game) {
             divider(ui);
             ui.add_space(2.0);
 
-            if icon_button(ui, Icon::Gear, 36.0, Look::Toggle(game.show_settings)).on_hover_text("Settings: display, graphics, interface").clicked() {
+            let muted = game.settings.muted;
+            let (icon, tip) = if muted { (Icon::SpeakerOff, "Sound is off: click to turn it on  (M)") } else { (Icon::Speaker, "Mute sound  (M)") };
+            if icon_button(ui, icon, 36.0, Look::Plain).on_hover_text(tip).clicked() {
+                game.settings.muted = !muted;
+            }
+            if icon_button(ui, Icon::Gear, 36.0, Look::Toggle(game.show_settings)).on_hover_text("Settings: display, sound, graphics, interface").clicked() {
                 game.show_settings = !game.show_settings;
             }
 

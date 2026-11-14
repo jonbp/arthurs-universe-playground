@@ -13,6 +13,7 @@ A space sandbox written in **Rust + Vulkan**. Start with the Solar System, then:
 - **Fly rockets.** Pick one of six rockets, lift off from any solid world and fly under real gravity, with a chase camera or from the cockpit. Land gently, or crash spectacularly. Younger pilots can switch on **Easy flying** for endless fuel and landings that always work.
 - **Walk on worlds.** Stand on a planet, moon or asteroid, walk over its terrain and jump in its gravity. Climb out of a landed rocket and back in.
 - **Save your universes.** Save a universe you've built or painted and load it again later. The game also saves automatically when you close it, so you can carry on where you left off.
+- **Hear it.** Rumbling impacts, roaring rocket engines, footsteps, supernovae you feel in your chest, and calm space music. All of it is generated live by the game.
 - **See what it's like there.** Every world reports its temperature, gravity, air, sunlight and whether people could live on it.
 - **Cosmic phenomena:**
   - **Black holes:** accretion disks with Doppler beaming, gravitational lensing, and tidal disruption ("spaghettification").
@@ -27,7 +28,7 @@ Grab the latest build from [Releases](https://github.com/jonbp/arthurs-universe-
 |---|---|---|
 | Windows 10/11 (x64) | `…-windows-x64.zip` | Needs a Vulkan-capable GPU driver (standard with NVIDIA, AMD and Intel drivers). |
 | macOS 11+ (Apple Silicon) | `…-macos-arm64.dmg` | MoltenVK is bundled. The app is not notarized: on first launch, right-click the app and choose **Open**. |
-| Linux (x86_64) | `…-linux-x86_64.tar.gz` | Needs `libvulkan1` and a Vulkan driver (Mesa or vendor). Run `./install.sh` to add it to your app menu. |
+| Linux (x86_64) | `…-linux-x86_64.tar.gz` | Needs `libvulkan1`, a Vulkan driver (Mesa or vendor) and `libasound2` for sound (installed on almost every desktop). Run `./install.sh` to add it to your app menu. |
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 
@@ -60,6 +61,7 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 | `B` | Asteroid barrage at selection |
 | `Del` | Delete selection |
 | `T` / `L` / `H` | Trails / labels / hide UI |
+| `M` | Mute or unmute sound |
 | `F11` | Fullscreen |
 
 Flying (Fly tool, then click a world or press **Launch**):
@@ -92,9 +94,11 @@ Time slows down automatically when you fly (0.2×) or walk (0.1×), because the 
 The gear button in the top-right bar opens **Settings**. Changes apply straight away and are saved automatically.
 
 - **Display:** fullscreen (`F11`), VSync, and a frame-rate limit (30–240 FPS, or off).
+- **Sound:** mute (`M`, or the speaker button), overall volume, effects and music.
 - **Resolution scale:** draw the 3D scene at 50–200% of the window resolution. Lower is faster on modest GPUs; above 100% supersamples for smoother edges. The interface always renders at full sharpness.
 - **Graphics:** planet detail (Low / Standard / High), exposure, glow, star brightness, gravitational lensing and orbit trails.
 - **Interface:** UI size (75–150%), labels, and the bodies / particles / FPS counter.
+- **Gameplay:** easy flying.
 
 Settings are stored in `%APPDATA%\Arthur's Universe Playground\settings.json` on Windows, `~/Library/Application Support/Arthur's Universe Playground/settings.json` on macOS, and `~/.config/arthurs-universe-playground/settings.json` on Linux. Set `AUP_SETTINGS` to use a different file.
 
@@ -104,6 +108,11 @@ Open the universe menu (top left) and choose **Saved universes…** to save the 
 
 Saves are `.aup` files in a `saves` folder next to `settings.json` (see above).
 
+## Sound
+
+Every sound is synthesized while the game runs; there are no audio files. Effects get quieter with distance from the camera and are panned left or right to match where they happen. The music is a slow ambient piece that drifts between four chords with bell notes on top and never repeats exactly. Linux builds need the ALSA headers (`sudo apt install libasound2-dev`).
+
+To hear every effect without playing, render a demo WAV: `AUP_DEMO_WAV=demo.wav cargo test --release demo_wav -- --ignored`.
 
 ## Updates
 

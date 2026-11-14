@@ -603,7 +603,9 @@ impl Game {
     pub fn spawn_body(&mut self, pos: DVec3, vel: DVec3) -> u64 {
         let b = self.make_spawn_body(pos, vel);
         let name = b.name.clone();
+        let (pos, size) = (b.pos, b.radius as f32);
         let id = self.universe.add(b);
+        self.universe.sound(crate::universe::Sound::Pop, Some(pos), size);
         self.universe.event(format!("Spawned {name}"));
         id
     }
@@ -635,6 +637,7 @@ impl Game {
         }
         let tname = self.universe.get(target).map(|b| b.name.clone()).unwrap_or_default();
         self.universe.add(b);
+        self.universe.sound(crate::universe::Sound::Whoosh, Some(start), radius as f32);
         self.universe.event(format!("Launched a {} at {}!", kind.label().to_lowercase(), tname));
     }
 
@@ -757,6 +760,7 @@ impl Game {
             "f11" => self.settings.fullscreen = !self.settings.fullscreen,
             "t" => self.settings.trails = !self.settings.trails,
             "l" => self.settings.labels = !self.settings.labels,
+            "m" => self.settings.muted = !self.settings.muted,
             "b" => {
                 if let Some(id) = self.selected {
                     self.barrage(id, 12);

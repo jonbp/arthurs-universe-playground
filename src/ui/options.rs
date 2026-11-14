@@ -1,5 +1,6 @@
 //! The settings panel: display (fullscreen, vsync, frame cap, resolution scale),
-//! graphics (planet detail, exposure, glow, stars, lensing, trails) and interface options.
+//! sound, graphics (planet detail, exposure, glow, stars, lensing, trails), interface and
+//! gameplay options.
 //! Everything here lives in `game.settings`; main.rs applies and saves it.
 
 use super::*;
@@ -44,6 +45,13 @@ fn choice_row<T: Copy + PartialEq>(ui: &mut Ui, label: &str, value: &mut T, opti
     });
 }
 
+/// A 0..1 slider shown (and typed) as a percentage.
+fn vol(v: &mut f32) -> egui::Slider<'_> {
+    egui::Slider::new(v, 0.0..=1.0)
+        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+        .custom_parser(|t| t.trim().trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0))
+}
+
 /// Small faint explanatory line under a control.
 fn note(ui: &mut Ui, text: impl Into<String>) {
     ui.add(egui::Label::new(RichText::new(text).size(11.0).color(FAINT)).wrap());
@@ -66,6 +74,14 @@ pub(super) fn settings_panel(ctx: &egui::Context, game: &mut Game, cam: &CameraF
             if s.vsync && s.fps_limit == 0 {
                 note(ui, "VSync caps the frame rate at your screen's refresh rate.");
             }
+
+            section(ui, "Sound");
+            switch_row(ui, "Mute  (M)", &mut s.muted);
+            ui.add_enabled_ui(!s.muted, |ui| {
+                slider_row(ui, "Volume", vol(&mut s.master_volume));
+                slider_row(ui, "Effects", vol(&mut s.effects_volume)).on_hover_text("Explosions, impacts, the rocket engine and footsteps");
+                slider_row(ui, "Music", vol(&mut s.music_volume));
+            });
 
             section(ui, "Resolution");
             slider_row(
@@ -108,6 +124,10 @@ pub(super) fn settings_panel(ctx: &egui::Context, game: &mut Game, cam: &CameraF
             choice_row(ui, "UI size", &mut s.ui_scale, &UI_SCALES, percent);
             switch_row(ui, "Labels  (L)", &mut s.labels);
             switch_row(ui, "Bodies, particles and FPS", &mut s.show_stats);
+
+            section(ui, "Gameplay");
+            switch_row(ui, "Easy flying", &mut s.easy_flying)
+                .on_hover_text("Endless fuel, an engine strong enough for any world, soft landings at any speed, and the rocket keeps itself level");
 
             ui.add_space(10.0);
             ui.horizontal(|ui| {
