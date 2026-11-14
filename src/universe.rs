@@ -643,13 +643,15 @@ impl Universe {
         }
     }
 
-    /// `big` swallows `small` (momentum conserving).
+    /// `big` swallows `small`. The result keeps their combined momentum and sits at
+    /// their shared centre of mass, so a merger never jolts the rest of the system.
     fn absorb(&mut self, big: usize, small: usize, splash: bool) {
         let s = self.bodies[small].clone();
         let (impact, n) = self.impact_info(big, small);
         let b = &mut self.bodies[big];
         let m = b.mass + s.mass;
         b.vel = (b.vel * b.mass + s.vel * s.mass) / m;
+        b.pos = (b.pos * b.mass + s.pos * s.mass) / m;
         let old_mass = b.mass;
         b.mass = m;
         match b.kind {
@@ -876,6 +878,7 @@ impl Universe {
         let b = &mut self.bodies[big];
         let m = b.mass + s.mass;
         b.vel = (b.vel * b.mass + s.vel * s.mass) / m;
+        b.pos = (b.pos * b.mass + s.pos * s.mass) / m;
         b.temperature = ((b.temperature as f64 * b.mass + s.temperature as f64 * s.mass) / m) as f32 * 1.1;
         if b.kind == BodyKind::Star && s.kind == BodyKind::Star {
             b.radius = (b.radius.powi(3) + s.radius.powi(3)).cbrt();
@@ -910,6 +913,7 @@ impl Universe {
         let b = &mut self.bodies[big];
         let m = b.mass + s.mass * 0.95; // 5% radiated as gravitational waves!
         b.vel = (b.vel * b.mass + s.vel * s.mass) / (b.mass + s.mass);
+        b.pos = (b.pos * b.mass + s.pos * s.mass) / (b.mass + s.mass);
         b.mass = m;
         b.radius = black_hole_radius(m);
         b.feeding = 4.0;
@@ -1491,6 +1495,26 @@ mod tests {
         u.update_particles(0.05);
         assert_eq!(u.particles.len(), reference.len());
         assert!(u.particles.iter().zip(&reference).all(|(x, y)| x.pos == y.pos && x.vel == y.vel && x.life == y.life));
+    }
+
+    #[test]
+    fn merged_body_sits_at_the_centre_of_mass() {
+        let mut u = Universe::new("t", 2);
+        u.collisions = CollisionMode::AlwaysMerge;
+        let a = u.new_body("A", BodyKind::Rocky, DVec3::new(-3.0, 0.0, 0.0), DVec3::new(1.0, 0.0, 0.0)).with_mass_radius(10.0, 1.0);
+        let b = u.new_body("B", BodyKind::Rocky, DVec3::new(3.0, 0.0, 0.0), DVec3::new(-1.0, 0.0, 0.5)).with_mass_radius(8.0, 1.0);
+        u.add(a);
+        u.add(b);
+        let centre = |u: &Universe| u.bodies.iter().map(|b| b.pos * b.mass).sum::<DVec3>() / 18.0;
+        let drift = u.bodies.iter().map(|b| b.vel * b.mass).sum::<DVec3>() / 18.0;
+        let start = centre(&u);
+        for _ in 0..300 {
+            u.update(1.0 / 60.0, 1.0, false);
+        }
+        assert_eq!(u.bodies.len(), 1, "bodies should have merged");
+        // Nothing outside pushed on the pair, so their centre of mass just kept drifting.
+        let expected = start + drift * u.time;
+        assert!((centre(&u) - expected).length() < 1e-6, "the merged body jumped {} away from the centre of mass", (centre(&u) - expected).length());
     }
 
     #[test]
