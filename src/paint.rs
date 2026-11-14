@@ -105,6 +105,19 @@ impl PaintStore {
         }
     }
 
+    /// Whether `layer` has been painted on (an untouched layer is all neutral).
+    pub fn is_touched(&self, layer: u32) -> bool {
+        self.touched.get(layer as usize).copied().unwrap_or(false)
+    }
+
+    /// Replace a layer's texels (loading a save) and queue it for upload.
+    pub fn set_layer(&mut self, layer: u32, texels: &[[u8; 4]]) {
+        let l = layer as usize;
+        self.layers[l].copy_from_slice(texels);
+        self.touched[l] = true;
+        self.dirty[l] = true;
+    }
+
     pub fn reset_all(&mut self) {
         for l in 1..MAX_LAYERS {
             self.clear_layer(l);

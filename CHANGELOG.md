@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Save your universes.** In the universe menu, **Saved universes…** lets you save the current universe under a name and load or delete saves. A save keeps every body and its orbit, painted terrain, rings, the stars of a galaxy, physics settings, the camera and the time speed. Saving a name that already exists replaces it, and deleting needs a second click to confirm.
+- **Continue where you left off.** The game saves automatically when you close it (and every 3 minutes while you play). **Continue where you left off** in the universe menu brings that back.
+
 ## [1.2.2] - 2026-11-14
 
 ### Added

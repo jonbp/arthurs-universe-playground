@@ -101,6 +101,8 @@ pub struct Game {
     /// Time scale to go back to when flight / walking ends.
     pub(crate) saved_time_scale: Option<f64>,
     pub updater: Updater,
+    /// Saved universes and the Saves window.
+    pub saves: crate::save::Saves,
     spawn_counter: u32,
     // input state
     pub mouse: Vec2,
@@ -155,6 +157,7 @@ impl Game {
             keys: std::collections::HashSet::new(),
             saved_time_scale: None,
             updater: Updater::disabled(),
+            saves: Default::default(),
             spawn_counter: 0,
             mouse: Vec2::ZERO,
             left_down: false,
@@ -174,7 +177,7 @@ impl Game {
     }
 
     /// Back to the plain sandbox before the universe is replaced.
-    fn end_trip(&mut self) {
+    pub(crate) fn end_trip(&mut self) {
         self.mode = Mode::Sandbox;
         self.saved_time_scale = None;
         self.universe.ship = None;

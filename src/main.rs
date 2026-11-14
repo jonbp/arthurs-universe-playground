@@ -21,6 +21,7 @@ mod presets;
 mod renderer;
 mod rocket;
 mod scene;
+mod save;
 mod settings;
 mod terrain;
 mod ui;
@@ -71,6 +72,8 @@ struct Options {
     cockpit: bool,
     /// Hold these keys down from the first frame (comma separated), e.g. "z" for full throttle.
     hold: Vec<String>,
+    /// Open the Saves window at start (for screenshots).
+    open_saves: bool,
     no_update_check: bool,
     /// Pretend to be this version when checking for updates (to test the banner).
     assume_version: Option<String>,
@@ -94,6 +97,11 @@ fn parse_args() -> Options {
             "--blackhole" => o.blackhole = next,
             "--zoom" => o.zoom = next.and_then(|s| s.parse().ok()),
             "--fly" => o.fly = next,
+            "--saves" => {
+                o.open_saves = true;
+                i += 1;
+                continue;
+            }
             "--walk" => o.walk = next,
             "--rocket" => o.rocket = next.and_then(|s| s.parse().ok()),
             "--hold" => o.hold = next.map(|s| s.split(',').map(|k| k.trim().to_lowercase()).collect()).unwrap_or_default(),
@@ -132,7 +140,7 @@ fn parse_args() -> Options {
             }
             "--help" | "-h" => {
                 println!(
-                    "Arthur's Universe Playground\n\nDeveloper options:\n  --preset <solar|rogue|theia|headon|binary|blackhole|supernova|galaxy|disk|empty>\n  --focus <body name>   --zoom <distance>   --speed <x>\n  --supernova <star>   --smash <body>   --paint <body>   --blackhole <body>\n  --screenshot <file.bmp> --frames <n>   --hide-ui   --icons (show the icon set)\n  --click <x,y@frame>   inject a UI click (repeatable)\n  --fly <body>   --walk <body>   --rocket <0-5>   --cockpit   --hold <key,key>\n  --no-update-check   --assume-version <x.y.z>\n\nSettings are saved to {}  (override with AUP_SETTINGS)",
+                    "Arthur's Universe Playground\n\nDeveloper options:\n  --preset <solar|rogue|theia|headon|binary|blackhole|supernova|galaxy|disk|empty>\n  --focus <body name>   --zoom <distance>   --speed <x>\n  --supernova <star>   --smash <body>   --paint <body>   --blackhole <body>\n  --screenshot <file.bmp> --frames <n>   --hide-ui   --icons (show the icon set)\n  --click <x,y@frame>   inject a UI click (repeatable)\n  --fly <body>   --walk <body>   --rocket <0-5>   --cockpit   --hold <key,key>\n  --saves (open the Saves window)\n  --no-update-check   --assume-version <x.y.z>\n\nSettings are saved to {}  (override with AUP_SETTINGS)",
                     settings::settings_path().map(|p| p.display().to_string()).unwrap_or_else(|| "(nowhere)".into())
                 );
                 std::process::exit(0);
@@ -246,6 +254,9 @@ impl State {
         );
         let mut game = Game::new();
         game.settings = settings.clone();
+        // Saves sit next to the settings file; automated runs neither read nor write them.
+        game.saves.dir = if persist_settings { save::saves_dir() } else { None };
+        game.saves.refresh();
         if let Some(p) = opts.preset.as_deref().and_then(preset_from_name) {
             game.load_preset(p);
         }
@@ -253,6 +264,9 @@ impl State {
             game.time_scale = s;
         }
         game.glyph_test = opts.glyph_test;
+        if opts.open_saves {
+            game.open_saves();
+        }
         if opts.hide_ui {
             game.show_ui = false;
         }
@@ -393,6 +407,9 @@ impl State {
 
     fn frame(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
         self.apply_settings();
+        if let Some(e) = self.game.autosave_if_due() {
+            log(&format!("Autosave failed: {e:#}"));
+        }
         self.limit_frame_rate();
         let now = Instant::now();
         let dt = (now - self.last).as_secs_f64().min(0.1);
@@ -555,7 +572,8 @@ impl ApplicationHandler for App {
         };
         match event {
             WindowEvent::CloseRequested => {
-                st.save_settings();
+                // Settings and the autosave are written in `exiting`, which every way of
+                // quitting goes through (including Cmd+Q on macOS).
                 event_loop.exit();
             }
             WindowEvent::Resized(_) => {
@@ -636,6 +654,15 @@ impl ApplicationHandler for App {
                 st.game.key_down(&key);
             }
             _ => {}
+        }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(st) = self.state.as_mut() {
+            st.save_settings();
+            if let Some(e) = st.game.autosave() {
+                log(&format!("Autosave failed: {e:#}"));
+            }
         }
     }
 

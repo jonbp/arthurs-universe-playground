@@ -12,6 +12,7 @@ A space sandbox written in **Rust + Vulkan**. Start with the Solar System, then:
 - **Create your own universe.** Pick a centre (Sun-like star, red dwarf, blue giant, binary, black hole, nothing), the number of planets, moons, belts, rings, gravity strength and chaos.
 - **Fly rockets.** Pick one of six rockets, lift off from any solid world and fly under real gravity, with a chase camera or from the cockpit. Land gently, or crash spectacularly. Younger pilots can switch on **Easy flying** for endless fuel and landings that always work.
 - **Walk on worlds.** Stand on a planet, moon or asteroid, walk over its terrain and jump in its gravity. Climb out of a landed rocket and back in.
+- **Save your universes.** Save a universe you've built or painted and load it again later. The game also saves automatically when you close it, so you can carry on where you left off.
 - **See what it's like there.** Every world reports its temperature, gravity, air, sunlight and whether people could live on it.
 - **Cosmic phenomena:**
   - **Black holes:** accretion disks with Doppler beaming, gravitational lensing, and tidal disruption ("spaghettification").
@@ -96,6 +97,13 @@ The gear button in the top-right bar opens **Settings**. Changes apply straight 
 - **Interface:** UI size (75–150%), labels, and the bodies / particles / FPS counter.
 
 Settings are stored in `%APPDATA%\Arthur's Universe Playground\settings.json` on Windows, `~/Library/Application Support/Arthur's Universe Playground/settings.json` on macOS, and `~/.config/arthurs-universe-playground/settings.json` on Linux. Set `AUP_SETTINGS` to use a different file.
+
+## Saving
+
+Open the universe menu (top left) and choose **Saved universes…** to save the current universe under a name, or to load or delete a save. Everything is kept: every body and its orbit, painted terrain, rings, the stars of a galaxy, physics settings, the camera and the time speed. When you close the game it saves to an autosave, and **Continue where you left off** in the same menu brings it back.
+
+Saves are `.aup` files in a `saves` folder next to `settings.json` (see above).
+
 
 ## Updates
 

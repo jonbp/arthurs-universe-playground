@@ -21,6 +21,7 @@ use crate::game::{Game, Tool};
 use crate::icons::Icon;
 use crate::paint::Brush;
 use crate::presets::{CenterKind, Preset};
+use crate::save;
 use crate::universe::CollisionMode;
 
 mod hud;
@@ -189,6 +190,8 @@ enum Look {
     Toggle(bool),
     /// Solid accent fill when on (the active tool, the play button).
     Primary(bool),
+    /// Solid red: a destructive action waiting for a second click.
+    Danger,
 }
 
 /// A framed single-line text field. egui outlines a focused field with the selection stroke,
@@ -213,6 +216,7 @@ fn icon_button(ui: &mut Ui, icon: Icon, size: f32, look: Look) -> Response {
         let press = if resp.is_pointer_button_down_on() { 10 } else { 0 };
         let (bg, fg) = match look {
             Look::Primary(true) => (mix(ACCENT, Color32::WHITE, t * 0.25), ON_ACCENT),
+            Look::Danger => (mix(DANGER, Color32::WHITE, t * 0.2), ON_ACCENT),
             Look::Toggle(true) => (mix(ACCENT_BG, with_alpha(ACCENT, 70), t * 0.5), ACCENT),
             _ => (white((t * 20.0) as u8 + press), mix(MUTED, TEXT, t)),
         };
@@ -601,6 +605,7 @@ pub fn draw(root: &mut Ui, game: &mut Game, cam: &CameraFrame, ppp: f32, scene_p
     stats_bar(&ctx, game);
     hud::update_banner(&ctx, game);
     custom_modal(&ctx, game);
+    saves_modal(&ctx, game);
     help_modal(&ctx, game);
 }
 
@@ -691,6 +696,19 @@ fn universe_dropdown(ui: &mut Ui, game: &mut Game) {
             if menu_row(ui, Icon::Sparkles, "Create your own universe…", "Pick a centre, planets, moons and chaos", Some(ACCENT)).clicked() {
                 game.show_custom = true;
                 ui.close();
+            }
+            if game.saves.dir.is_some() {
+                let resume = game.saves.autosave_info().map(|s| (s.path.clone(), format!("{} · {}", s.name, save::ago(s.saved_at, save::now()))));
+                if let Some((path, desc)) = resume {
+                    if menu_row(ui, Icon::Reset, "Continue where you left off", &desc, None).clicked() {
+                        game.load_save(&path);
+                        ui.close();
+                    }
+                }
+                if menu_row(ui, Icon::Folder, "Saved universes…", "Save this universe, or load one you saved", None).clicked() {
+                    game.open_saves();
+                    ui.close();
+                }
             }
         });
     }
@@ -1588,6 +1606,86 @@ fn custom_modal(ctx: &egui::Context, game: &mut Game) {
         game.show_custom = false;
     } else if close || resp.should_close() {
         game.show_custom = false;
+    }
+}
+
+fn saves_modal(ctx: &egui::Context, game: &mut Game) {
+    if !game.saves.show {
+        return;
+    }
+    enum Act {
+        Save,
+        Load(std::path::PathBuf),
+        Delete(std::path::PathBuf),
+    }
+    let mut act = None;
+    let mut close = false;
+    let now = save::now();
+    let resp = modal("saves_modal").show(ctx, |ui| {
+        ui.set_width(400.0);
+        close = card_header(ui, Icon::Save, "Saved universes", Some("Keep your worlds and come back to them later"), true);
+        let saves = &mut game.saves;
+
+        section(ui, "Save this universe");
+        let field = text_field(ui, egui::TextEdit::singleline(&mut saves.name).hint_text("Name this save").desired_width(f32::INFINITY).margin(Margin::symmetric(10, 7)));
+        let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let slot = save::slot_for(&saves.name);
+        if let Some(old) = saves.list.iter().find(|s| !s.autosave && s.slot == slot) {
+            ui.label(RichText::new(format!("This replaces the save called \u{201c}{}\u{201d}.", old.name)).size(11.5).color(MUTED));
+        }
+        ui.add_space(4.0);
+        if primary_button(ui, Icon::Save, "Save").clicked() || enter {
+            act = Some(Act::Save);
+        }
+        if let Some((text, error)) = &saves.message {
+            ui.add_space(4.0);
+            ui.label(RichText::new(text.as_str()).size(12.0).color(if *error { DANGER } else { Color32::from_rgb(126, 214, 138) }));
+        }
+
+        section(ui, "Your saves");
+        if saves.list.is_empty() {
+            tip(ui, Icon::Folder, "Nothing saved yet. Your universe is also saved automatically when you close the game.");
+        }
+        egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for s in &saves.list {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let w = ui.available_width() - 40.0;
+                    let title = if s.autosave { format!("{}  (autosave)", s.name) } else { s.name.clone() };
+                    let worlds = if s.bodies == 1 { "1 body".to_string() } else { format!("{} bodies", s.bodies) };
+                    let desc = format!("{worlds} · saved {}", save::ago(s.saved_at, now));
+                    let icon = if s.autosave { Icon::Reset } else { Icon::Galaxy };
+                    let row = ui.allocate_ui(vec2(w, 42.0), |ui| menu_row(ui, icon, &title, &desc, None)).inner;
+                    if row.on_hover_text("Load this universe").clicked() {
+                        act = Some(Act::Load(s.path.clone()));
+                    }
+                    let confirming = saves.confirm_delete.as_ref() == Some(&s.path);
+                    let (look, hint) = if confirming { (Look::Danger, "Click again to delete it for good") } else { (Look::Plain, "Delete this save") };
+                    if icon_button(ui, Icon::Trash, 34.0, look).on_hover_text(hint).clicked() {
+                        act = Some(Act::Delete(s.path.clone()));
+                    }
+                });
+            }
+        });
+    });
+    match act {
+        Some(Act::Save) => {
+            let name = game.saves.name.clone();
+            game.save_as(&name);
+        }
+        Some(Act::Load(path)) => game.load_save(&path),
+        Some(Act::Delete(path)) => {
+            if game.saves.confirm_delete.as_ref() == Some(&path) {
+                game.delete_save(&path);
+            } else {
+                game.saves.confirm_delete = Some(path);
+            }
+        }
+        None => {}
+    }
+    if close || resp.should_close() {
+        game.saves.show = false;
     }
 }
 

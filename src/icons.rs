@@ -84,10 +84,13 @@ pub enum Icon {
     Thermometer,
     Download,
     Seat,
+    // Saves and sound
+    Save,
+    Folder,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 69] = [
+    pub const ALL: [Icon; 71] = [
         Icon::Cursor,
         Icon::SpawnPlanet,
         Icon::Brush,
@@ -157,6 +160,8 @@ impl Icon {
         Icon::Thermometer,
         Icon::Download,
         Icon::Seat,
+        Icon::Save,
+        Icon::Folder,
     ];
 
     pub fn name(self) -> String {
@@ -806,6 +811,16 @@ fn draw(icon: Icon, p: &Pen) {
             p.line(&[(4.5, 20.5), (19.5, 20.5)]);
             p.line(&[(12.0, 15.0), (12.0, 20.5)]);
             p.line(&[(12.0, 3.5), (12.0, 6.5)]);
+        }
+        Save => {
+            // Floppy disk: body with a clipped corner, shutter on top, label below.
+            p.closed(&[(4.0, 4.0), (17.0, 4.0), (20.0, 7.0), (20.0, 20.0), (4.0, 20.0)]);
+            p.line(&[(8.0, 4.0), (8.0, 8.5), (15.0, 8.5), (15.0, 4.0)]);
+            p.line(&[(7.5, 20.0), (7.5, 13.5), (16.5, 13.5), (16.5, 20.0)]);
+        }
+        Folder => {
+            p.closed(&[(3.0, 6.0), (3.0, 19.0), (21.0, 19.0), (21.0, 8.5), (11.5, 8.5), (9.5, 6.0)]);
+            p.line(&[(3.0, 11.0), (21.0, 11.0)]);
         }
     }
 }

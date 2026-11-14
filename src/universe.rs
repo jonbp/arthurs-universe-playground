@@ -189,6 +189,11 @@ impl Universe {
         Body::new(id, name, kind, pos, vel, &mut self.rng)
     }
 
+    /// After adding bodies with ids of their own (loading a save): new ids start above them.
+    pub fn sync_next_id(&mut self) {
+        self.next_id = self.bodies.iter().map(|b| b.id + 1).max().unwrap_or(1).max(self.next_id);
+    }
+
     pub fn add(&mut self, b: Body) -> u64 {
         let id = b.id;
         self.bodies.push(b);
