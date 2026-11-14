@@ -71,6 +71,10 @@ pub struct Settings {
     pub ui_scale: f32,
     pub labels: bool,
     pub show_stats: bool,
+    // Gameplay
+    /// Forgiving rocket flight: endless fuel, an engine strong enough for any world,
+    /// soft landings at any speed and self-levelling steering.
+    pub easy_flying: bool,
 }
 
 impl Default for Settings {
@@ -89,6 +93,7 @@ impl Default for Settings {
             ui_scale: 1.0,
             labels: true,
             show_stats: true,
+            easy_flying: false,
         }
     }
 }
@@ -123,6 +128,7 @@ impl Settings {
             "ui_scale": r(self.ui_scale),
             "labels": self.labels,
             "show_stats": self.show_stats,
+            "easy_flying": self.easy_flying,
         })
     }
 
@@ -157,6 +163,7 @@ impl Settings {
         f("ui_scale", &mut s.ui_scale);
         b("labels", &mut s.labels);
         b("show_stats", &mut s.show_stats);
+        b("easy_flying", &mut s.easy_flying);
         s.sanitize();
         s
     }
@@ -226,6 +233,7 @@ mod tests {
             ui_scale: 1.25,
             labels: false,
             show_stats: false,
+            easy_flying: true,
         };
         assert_eq!(Settings::from_json(&s.to_json()), s);
     }

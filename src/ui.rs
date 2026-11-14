@@ -109,8 +109,10 @@ pub fn setup_style(ctx: &egui::Context) {
     v.popup_shadow = Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(110) };
     v.extreme_bg_color = Color32::from_rgba_premultiplied(8, 8, 12, 120);
     v.faint_bg_color = white(6);
+    // egui draws a selected item's text (menu entries, highlighted text) in the selection
+    // stroke colour on top of the selection fill: it must contrast with the accent.
     v.selection.bg_fill = ACCENT;
-    v.selection.stroke = Stroke::new(1.5, ACCENT);
+    v.selection.stroke = Stroke::new(1.5, ON_ACCENT);
     v.slider_trailing_fill = true;
     v.handle_shape = egui::style::HandleShape::Circle;
     v.interact_cursor = Some(egui::CursorIcon::PointingHand);
@@ -187,6 +189,16 @@ enum Look {
     Toggle(bool),
     /// Solid accent fill when on (the active tool, the play button).
     Primary(bool),
+}
+
+/// A framed single-line text field. egui outlines a focused field with the selection stroke,
+/// which is dark (it is also highlighted text's colour), so draw the accent focus ring here.
+fn text_field(ui: &mut Ui, field: egui::TextEdit) -> Response {
+    let resp = ui.add(field);
+    if resp.has_focus() {
+        ui.painter().rect_stroke(resp.rect, 9, Stroke::new(1.5, ACCENT), StrokeKind::Inside);
+    }
+    resp
 }
 
 fn hover_t(ui: &Ui, resp: &Response) -> f32 {
@@ -335,8 +347,11 @@ fn switch_row(ui: &mut Ui, label: &str, value: &mut bool) -> Response {
     resp
 }
 
-/// Label on the left, slider filling the rest of the row.
+/// Label on the left, slider filling the rest of the row. Only the user's own edits are clamped
+/// to the slider's range: a value already outside it (the Sun's mass, say) is shown as-is
+/// rather than silently rewritten every frame.
 fn slider_row(ui: &mut Ui, label: &str, slider: egui::Slider) -> Response {
+    let slider = slider.clamping(egui::SliderClamping::Edits);
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(vec2(84.0, 24.0), Layout::left_to_right(Align::Center), |ui| {
             ui.set_min_width(84.0);
@@ -979,7 +994,7 @@ fn spawn_tool(ui: &mut Ui, game: &mut Game) {
         s.rings = s.kind == BodyKind::GasGiant;
     }
     ui.add_space(4.0);
-    ui.add(egui::TextEdit::singleline(&mut s.name).hint_text("Name (automatic)").desired_width(f32::INFINITY).margin(Margin::symmetric(10, 6)));
+    text_field(ui, egui::TextEdit::singleline(&mut s.name).hint_text("Name (automatic)").desired_width(f32::INFINITY).margin(Margin::symmetric(10, 6)));
     section(ui, "Properties");
     slider_row(ui, "Mass", egui::Slider::new(&mut s.mass, 0.01..=100000.0).logarithmic(true));
     if s.kind != BodyKind::BlackHole {
@@ -1237,7 +1252,7 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
 
             // Physical properties.
             section(ui, "Physical");
-            slider_row(ui, "Mass", egui::Slider::new(&mut b.mass, 0.001..=200000.0).logarithmic(true));
+            slider_row(ui, "Mass", egui::Slider::new(&mut b.mass, 0.001..=1_000_000.0).logarithmic(true));
             if b.kind == BodyKind::BlackHole {
                 b.radius = black_hole_radius(b.mass);
                 slider_row(ui, "Accretion", egui::Slider::new(&mut b.feeding, 0.0..=5.0));
@@ -1269,7 +1284,7 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
                     });
                     v3_edit(ui, &mut s.atmosphere);
                     fill_slider_width(ui);
-                    ui.add(egui::Slider::new(&mut s.atmo_strength, 0.0..=2.0));
+                    ui.add(egui::Slider::new(&mut s.atmo_strength, 0.0..=2.0).clamping(egui::SliderClamping::Edits));
                 });
                 slider_row(ui, "Terrain seed", egui::Slider::new(&mut s.seed, 0.0..=10.0));
                 slider_row(ui, "Terrain height", egui::Slider::new(&mut s.terrain, 0.0..=0.2));
@@ -1295,7 +1310,7 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
                         });
                         v3_edit(ui, &mut r.color);
                         fill_slider_width(ui);
-                        ui.add(egui::Slider::new(&mut r.opacity, 0.0..=1.0));
+                        ui.add(egui::Slider::new(&mut r.opacity, 0.0..=1.0).clamping(egui::SliderClamping::Edits));
                     });
                     if r.outer < r.inner + 0.1 {
                         r.outer = r.inner + 0.1;
@@ -1536,7 +1551,7 @@ fn custom_modal(ctx: &egui::Context, game: &mut Game) {
         ui.set_width(380.0);
         let p = &mut game.custom;
         close = card_header(ui, Icon::Sparkles, "Create your own universe", Some("Design a new system from scratch"), true);
-        ui.add(egui::TextEdit::singleline(&mut p.name).hint_text("Universe name").desired_width(f32::INFINITY).margin(Margin::symmetric(10, 7)));
+        text_field(ui, egui::TextEdit::singleline(&mut p.name).hint_text("Universe name").desired_width(f32::INFINITY).margin(Margin::symmetric(10, 7)));
         section(ui, "Centre");
         tile_grid(ui, &CenterKind::ALL, 3, 60.0, |ui, c, size| {
             let (icon, label, tint) = center_info(c);
@@ -1748,4 +1763,46 @@ fn icon_gallery(ctx: &egui::Context) {
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+
+    /// Selected menu entries and highlighted text are drawn in the selection stroke colour on
+    /// the selection fill; both were the accent yellow, which made "1×" in the speed menu vanish.
+    #[test]
+    fn selected_text_contrasts_with_the_selection_fill() {
+        fn luminance(c: Color32) -> f32 {
+            let lin = |v: u8| egui::ecolor::linear_f32_from_gamma_u8(v);
+            0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+        }
+        let ctx = egui::Context::default();
+        setup_style(&ctx);
+        let sel = ctx.global_style().visuals.selection;
+        let (a, b) = (luminance(sel.bg_fill), luminance(sel.stroke.color));
+        let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+        assert!(ratio >= 4.5, "contrast {ratio:.2}:1");
+    }
+
+    /// Selecting a body opens the inspector; merely showing it must not change the body.
+    /// (The Sun is heavier than the Mass slider's old maximum, and egui's default clamping
+    /// halved it every frame, flinging every planet out of orbit.)
+    #[test]
+    fn inspecting_the_sun_leaves_its_mass_alone() {
+        let mut game = Game::new();
+        game.load_preset(Preset::SolarSystem);
+        let sun = game.universe.bodies.iter().find(|b| b.name == "Sun").unwrap();
+        let (id, mass, radius) = (sun.id, sun.mass, sun.radius);
+        game.selected = Some(id);
+        let ctx = egui::Context::default();
+        setup_style(&ctx);
+        for _ in 0..3 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| inspector(ui.ctx(), &mut game));
+        }
+        let sun = game.universe.get(id).unwrap();
+        assert_eq!(sun.mass, mass);
+        assert_eq!(sun.radius, radius);
+    }
 }

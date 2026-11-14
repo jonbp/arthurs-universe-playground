@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-14
+
+### Added
+
+- **Easy flying.** A new switch in the Hangar (and a button on the flight panel, or press `F` while flying) for younger pilots and relaxed trips: the fuel tank never runs dry, every rocket has enough power to lift off from any world, touching down on solid ground always lands safely however fast you come in, and the rocket keeps itself level. `A`/`D` turn left and right like an aeroplane. Stars, black holes and gas giants are still dangerous. The choice is saved with your settings.
+
+### Fixed
+
+- Clicking the Sun no longer sends every planet flying out of the Solar System. The inspector's Mass slider stopped at 200,000 and quietly cut the Sun's mass (400,000) in half as soon as it was shown. Now showing the inspector never changes a body, and the Mass slider goes up to 1,000,000.
+- Selected items are readable again: the chosen entry in the speed menu (such as `1×`) and text you highlight in a name box were drawn in yellow on yellow. They now use dark text, and text boxes keep their yellow outline while you type.
+
 ## [1.2.1] - 2026-11-14
 
 ### Added
@@ -76,7 +87,8 @@ First public release.
 - Ten presets, including Theia Impact, Black Hole Feast, Supernova Countdown and Galaxy Collision.
 - Downloadable builds for Windows (x64), macOS (Apple Silicon, MoltenVK bundled) and Linux (x86_64), all with the app icon.
 
-[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.0.0...v1.1.0

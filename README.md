@@ -10,7 +10,7 @@ A space sandbox written in **Rust + Vulkan**. Start with the Solar System, then:
 - **Spawn new worlds.** Click to drop a planet into a circular orbit, or click-and-drag to fling it, with a live predicted trajectory (it turns red if it's going to crash).
 - **Smash planets together.** Collisions use an impact-energy model: gentle hits merge (leaving craters and molten scars), harder ones shatter worlds into glowing fragments and debris that can re-accrete.
 - **Create your own universe.** Pick a centre (Sun-like star, red dwarf, blue giant, binary, black hole, nothing), the number of planets, moons, belts, rings, gravity strength and chaos.
-- **Fly rockets.** Pick one of six rockets, lift off from any solid world and fly under real gravity, with a chase camera or from the cockpit. Land gently, or crash spectacularly.
+- **Fly rockets.** Pick one of six rockets, lift off from any solid world and fly under real gravity, with a chase camera or from the cockpit. Land gently, or crash spectacularly. Younger pilots can switch on **Easy flying** for endless fuel and landings that always work.
 - **Walk on worlds.** Stand on a planet, moon or asteroid, walk over its terrain and jump in its gravity. Climb out of a landed rocket and back in.
 - **See what it's like there.** Every world reports its temperature, gravity, air, sunlight and whether people could live on it.
 - **Cosmic phenomena:**
@@ -68,6 +68,7 @@ Flying (Fly tool, then click a world or press **Launch**):
 | `W` `S` / `A` `D` / `Q` `E` | Tilt / turn / roll (arrow keys also steer) |
 | `Shift` / `Ctrl` | Throttle up / down (`Z` full, `X` off) |
 | `R` | Brake assist: hold the nose against your direction of travel |
+| `F` | Easy flying: endless fuel, soft landings, self-levelling (also in the Hangar) |
 | `V` | Cockpit or outside view (drag to orbit, scroll to zoom) |
 | `G` | Get out and walk (when landed) |
 | `Enter` | Launch a new rocket after a crash |

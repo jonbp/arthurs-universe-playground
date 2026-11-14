@@ -4,6 +4,8 @@
 //!   physics step (`Universe::ship`), so it feels the gravity of everything and
 //!   stays exact at any time scale. Steering is arcade-style: the keys turn the
 //!   rocket directly. Touch down gently and it lands; too fast and it is wrecked.
+//!   Easy flying (a setting) keeps the tank full, gives every rocket enough thrust to
+//!   leave any world, lands it however hard it comes down and keeps the wings level.
 //! * **Walking** - the astronaut is stored in the body's own rotating coordinates,
 //!   so the ground stays still underfoot while the planet spins and orbits.
 
@@ -30,6 +32,8 @@ const BOARD_RANGE: f64 = 0.15;
 pub const FLIGHT_TIME_SCALE: f64 = 0.2;
 pub const WALK_TIME_SCALE: f64 = 0.1;
 const FIRST_PERSON_FOV: f32 = 1.15;
+/// In easy flying the engine always gives at least this many times the local gravity.
+const EASY_THRUST_MARGIN: f64 = 2.5;
 
 pub enum Mode {
     Sandbox,
@@ -145,7 +149,9 @@ pub struct FlightInfo {
     pub roll: f64,
     pub brake_assist: bool,
     pub grounded_by_gravity: bool,
+    /// Fastest touchdown the legs survive (infinite in easy flying).
     pub safe_landing_speed: f64,
+    pub easy: bool,
 }
 
 /// Numbers for the walking HUD.
@@ -231,6 +237,35 @@ impl Flight {
         self.orient * DVec3::Y
     }
 
+    /// Engine acceleration at full throttle. In easy flying it is always enough to climb
+    /// away from wherever the rocket is.
+    fn engine_accel(&self, u: &Universe, easy: bool) -> f64 {
+        let accel = self.spec().accel;
+        if easy {
+            accel.max(u.gravity_at(self.pos).length() * EASY_THRUST_MARGIN)
+        } else {
+            accel
+        }
+    }
+
+    /// Easy-flying steering: A/D turn around the local "up" like an aircraft changing
+    /// heading, and the rocket rolls itself level whenever Q/E are not held.
+    fn easy_steer(&mut self, c: &Controls, a: f64) {
+        let up = self.cam_up;
+        // Pointing (nearly) straight up or down, "heading" means nothing: steer as usual.
+        let upright = self.nose().dot(up).abs() > 0.97;
+        let mut q = self.orient * DQuat::from_rotation_x(c.pitch * a);
+        q = if upright { q * DQuat::from_rotation_z(c.yaw * a) } else { DQuat::from_axis_angle(up, c.yaw * a) * q };
+        if c.roll != 0.0 {
+            q *= DQuat::from_rotation_y(c.roll * a);
+        } else if !upright {
+            let (right, top) = (q * DVec3::X, q * DVec3::Z);
+            let roll = right.dot(up).atan2(top.dot(up));
+            q *= DQuat::from_rotation_y(roll.clamp(-a * 1.5, a * 1.5));
+        }
+        self.orient = q.normalize();
+    }
+
     fn burning(&self) -> bool {
         matches!(self.state, FlightState::Flying) && self.throttle > 0.0 && self.fuel > 0.0
     }
@@ -246,15 +281,22 @@ impl Flight {
     }
 
     /// Steering, throttle and lift-off: everything that must happen before the physics step.
-    fn pre_sim(&mut self, u: &mut Universe, c: &Controls, dt: f64) {
+    fn pre_sim(&mut self, u: &mut Universe, c: &Controls, dt: f64, easy: bool) {
         let spec = self.spec();
+        if easy {
+            self.fuel = 1.0;
+        }
         self.throttle = (self.throttle + c.throttle * dt * 0.9).clamp(0.0, 1.0);
         self.grounded_by_gravity = false;
         match self.state.clone() {
             FlightState::Flying => {
                 let a = spec.turn_rate * dt;
-                let turn = DQuat::from_rotation_x(c.pitch * a) * DQuat::from_rotation_z(c.yaw * a) * DQuat::from_rotation_y(c.roll * a);
-                self.orient = (self.orient * turn).normalize();
+                if easy {
+                    self.easy_steer(c, a);
+                } else {
+                    let turn = DQuat::from_rotation_x(c.pitch * a) * DQuat::from_rotation_z(c.yaw * a) * DQuat::from_rotation_y(c.roll * a);
+                    self.orient = (self.orient * turn).normalize();
+                }
                 if self.brake_assist && c.pitch == 0.0 && c.yaw == 0.0 {
                     let reference = u.reference_body(self.pos).map(|i| Universe::ground_velocity(&u.bodies[i], self.pos)).unwrap_or(DVec3::ZERO);
                     let rel = self.vel - reference;
@@ -263,7 +305,7 @@ impl Flight {
                         self.orient = (DQuat::from_axis_angle(axis, angle.min(a * 1.5)) * self.orient).normalize();
                     }
                 }
-                let thrust = if self.burning() { self.nose() * spec.accel * self.throttle } else { DVec3::ZERO };
+                let thrust = if self.burning() { self.nose() * self.engine_accel(u, easy) * self.throttle } else { DVec3::ZERO };
                 let (pos, vel, radius) = (self.pos, self.vel, self.radius());
                 u.ship.get_or_insert_with(|| Ship::new(pos, vel, radius)).thrust = thrust;
             }
@@ -280,13 +322,14 @@ impl Flight {
                 if self.throttle > 0.02 {
                     let up = (self.pos - b.pos).normalize();
                     let weight = -u.gravity_at(self.pos).dot(up);
-                    if spec.accel * self.throttle > weight * 1.02 {
+                    let accel = self.engine_accel(u, easy);
+                    if accel * self.throttle > weight * 1.02 {
                         self.state = FlightState::Flying;
                         self.pos += up * 0.003;
                         // A nudge, not a kick: tiny moons have escape speeds well under 1.
                         self.vel = Universe::ground_velocity(&b, self.pos) + up * 0.02;
                         let mut ship = Ship::new(self.pos, self.vel, self.radius());
-                        ship.thrust = up * spec.accel * self.throttle;
+                        ship.thrust = up * accel * self.throttle;
                         u.ship = Some(ship);
                         u.event(format!("{} lifted off from {}", spec.name, b.name));
                     } else if self.throttle > 0.98 {
@@ -302,18 +345,18 @@ impl Flight {
     }
 
     /// Read the ship back after the physics step and react to touching the ground.
-    fn post_sim(&mut self, u: &mut Universe, dt: f64, sim_dt: f64) {
+    fn post_sim(&mut self, u: &mut Universe, dt: f64, sim_dt: f64, easy: bool) {
         let spec = self.spec();
         match self.state.clone() {
             FlightState::Flying => {
-                if self.burning() {
+                if self.burning() && !easy {
                     self.fuel = (self.fuel - self.throttle * sim_dt / spec.burn_time).max(0.0);
                 }
                 if let Some(s) = u.ship.as_mut() {
                     self.pos = s.pos;
                     self.vel = s.vel;
                     if let Some(hit) = s.hit.take() {
-                        self.touch_down(u, hit);
+                        self.touch_down(u, hit, easy);
                     }
                 }
             }
@@ -341,7 +384,7 @@ impl Flight {
         self.cam_up = self.cam_up.lerp(target, 1.0 - (-dt * 3.0).exp()).try_normalize().unwrap_or(target);
     }
 
-    fn touch_down(&mut self, u: &mut Universe, hit: ShipHit) {
+    fn touch_down(&mut self, u: &mut Universe, hit: ShipHit, easy: bool) {
         let spec = self.spec();
         let Some(i) = u.index_of(hit.body) else { return };
         let (name, kind) = (u.bodies[i].name.clone(), u.bodies[i].kind);
@@ -349,7 +392,7 @@ impl Flight {
             BodyKind::BlackHole => Some(format!("{} fell into {name} and was never seen again", spec.name)),
             BodyKind::Star | BodyKind::NeutronStar => Some(format!("{} burned up in {name}", spec.name)),
             BodyKind::GasGiant | BodyKind::IceGiant => Some(format!("{} sank into the clouds of {name} and was crushed", spec.name)),
-            _ if hit.speed > spec.max_landing_speed => Some(format!("{} crashed into {name} at speed {:.1}", spec.name, hit.speed)),
+            _ if hit.speed > spec.max_landing_speed && !easy => Some(format!("{} crashed into {name} at speed {:.1}", spec.name, hit.speed)),
             _ => None,
         };
         match reason {
@@ -691,6 +734,16 @@ impl Game {
         }
     }
 
+    /// Switch easy flying on or off (also from the hangar and the flight HUD).
+    pub fn toggle_easy_flying(&mut self) {
+        self.settings.easy_flying = !self.settings.easy_flying;
+        self.universe.event(if self.settings.easy_flying {
+            "Easy flying on: endless fuel, soft landings and the wings keep themselves level"
+        } else {
+            "Easy flying off: watch your fuel and land gently"
+        });
+    }
+
     /// Key presses while flying or walking. Returns true if the key was used.
     pub(crate) fn mode_key(&mut self, key: &str) -> bool {
         if !self.exploring() {
@@ -715,8 +768,9 @@ impl Game {
                     "z" => f.throttle = 1.0,
                     "x" => f.throttle = 0.0,
                     "r" => f.brake_assist = !f.brake_assist,
+                    "f" => self.toggle_easy_flying(),
                     // Steering keys and tool keys do nothing as presses.
-                    "w" | "a" | "s" | "d" | "q" | "e" | "f" | "b" | "1" | "2" | "3" | "4" | "5" | "6" | "delete" | "backspace" => {}
+                    "w" | "a" | "s" | "d" | "q" | "e" | "b" | "1" | "2" | "3" | "4" | "5" | "6" | "delete" | "backspace" => {}
                     _ => return false,
                 },
                 Mode::Walk(_) => match key {
@@ -754,7 +808,7 @@ impl Game {
     pub(crate) fn mode_pre_sim(&mut self, dt: f64) {
         let c = self.controls();
         if let Mode::Flight(f) = &mut self.mode {
-            f.pre_sim(&mut self.universe, &c, dt);
+            f.pre_sim(&mut self.universe, &c, dt, self.settings.easy_flying);
         }
     }
 
@@ -763,7 +817,7 @@ impl Game {
         let jump = self.held("space");
         let mut ground_lost = None;
         match &mut self.mode {
-            Mode::Flight(f) => f.post_sim(&mut self.universe, dt, sim_dt),
+            Mode::Flight(f) => f.post_sim(&mut self.universe, dt, sim_dt, self.settings.easy_flying),
             Mode::Walk(w) => match self.universe.get(w.body).filter(|b| terrain::has_solid_surface(b.kind)) {
                 Some(b) => w.update(&self.universe, b, &c, jump, dt),
                 None => ground_lost = Some(()),
@@ -851,6 +905,7 @@ impl Game {
         let Mode::Flight(f) = &self.mode else { return None };
         let u = &self.universe;
         let spec = f.spec();
+        let easy = self.settings.easy_flying;
         let near = u.reference_body(f.pos).map(|i| &u.bodies[i]);
         let reference = near.map(|b| Universe::ground_velocity(b, f.pos)).unwrap_or(DVec3::ZERO);
         // Far from any surface, ground spin is meaningless: measure against the body itself.
@@ -888,7 +943,8 @@ impl Game {
             roll: right.dot(up).atan2(top.dot(up)),
             brake_assist: f.brake_assist,
             grounded_by_gravity: f.grounded_by_gravity,
-            safe_landing_speed: spec.max_landing_speed,
+            safe_landing_speed: if easy { f64::INFINITY } else { spec.max_landing_speed },
+            easy,
         })
     }
 
@@ -1098,6 +1154,79 @@ mod tests {
         // The cockpit camera looks along the nose.
         let cam = g.view_frame(1600.0, 1000.0);
         assert!(cam.fwd.dot(flight(&g).nose().as_vec3()) > 0.999);
+    }
+
+    #[test]
+    fn easy_flying_lifts_any_rocket_off_and_never_runs_dry() {
+        let mut g = game();
+        g.settings.easy_flying = true;
+        // The Ion Glider can't leave Earth normally (see above), but easy flying can.
+        g.rocket = ROCKETS.iter().position(|r| r.name == "Ion Glider").unwrap();
+        g.start_flight(Some(id(&g, "Earth")), None);
+        flight_mut(&mut g).fuel = 0.3;
+        g.key_down("z");
+        run(&mut g, 2.0);
+        let f = flight(&g);
+        assert!(matches!(f.state, FlightState::Flying), "{:?}", f.state);
+        assert_eq!(f.fuel, 1.0, "the tank stays full");
+        assert!(altitude(&g) > 0.2, "altitude {}", altitude(&g));
+        assert!(!g.flight_info().unwrap().grounded_by_gravity);
+    }
+
+    #[test]
+    fn easy_flying_lands_however_hard_you_come_down() {
+        let mut g = game();
+        g.settings.easy_flying = true;
+        let earth = id(&g, "Earth");
+        g.start_flight(Some(earth), None);
+        g.key_down("z");
+        g.key_up("z");
+        run(&mut g, 1.0);
+        g.key_down("x");
+        g.key_up("x");
+        // The same dive that wrecks a rocket in normal flight.
+        let b = g.universe.get(earth).unwrap().clone();
+        let ship = g.universe.ship.as_mut().unwrap();
+        ship.vel = b.vel - (ship.pos - b.pos).normalize() * 9.0;
+        run(&mut g, 10.0);
+        assert!(matches!(flight(&g).state, FlightState::Landed { .. }), "{:?}", flight(&g).state);
+        assert!(g.universe.log.iter().any(|l| l.contains("landed on Earth")), "{:?}", g.universe.log);
+        // Stars are still no place to land.
+        g.start_flight(Some(id(&g, "Sun")), None);
+        let sun = g.universe.get(id(&g, "Sun")).unwrap().clone();
+        run(&mut g, 0.05);
+        let s = g.universe.ship.as_mut().unwrap();
+        s.vel = sun.vel - (s.pos - sun.pos).normalize() * 60.0;
+        run(&mut g, 10.0);
+        assert!(matches!(&flight(&g).state, FlightState::Destroyed { reason, .. } if reason.contains("burned up")), "{:?}", flight(&g).state);
+    }
+
+    #[test]
+    fn easy_flying_levels_the_wings_and_turns_around_up() {
+        let mut g = game();
+        g.settings.easy_flying = true;
+        g.start_flight(Some(id(&g, "Jupiter")), None);
+        run(&mut g, 0.05);
+        let roll = |g: &Game| g.flight_info().unwrap().roll;
+        // Bank hard, let go, and the rocket rolls itself back level.
+        g.key_down("e");
+        run(&mut g, 0.5);
+        g.key_up("e");
+        assert!(roll(&g).abs() > 0.4, "banked {}", roll(&g));
+        run(&mut g, 2.0);
+        assert!(roll(&g).abs() < 0.02, "still banked {}", roll(&g));
+        // Turning changes heading without tipping the nose up or down.
+        let pitch = g.flight_info().unwrap().pitch;
+        let nose = flight(&g).nose();
+        g.key_down("a");
+        run(&mut g, 0.5);
+        g.key_up("a");
+        assert!(nose.angle_between(flight(&g).nose()) > 0.5);
+        assert!((g.flight_info().unwrap().pitch - pitch).abs() < 0.05, "pitch {pitch} -> {}", g.flight_info().unwrap().pitch);
+        assert!(roll(&g).abs() < 0.05);
+        // F switches it back off.
+        g.key_down("f");
+        assert!(!g.settings.easy_flying);
     }
 
     #[test]

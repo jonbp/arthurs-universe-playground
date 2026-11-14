@@ -104,6 +104,13 @@ pub(super) fn fly_tool(ui: &mut Ui, game: &mut Game) {
     meter_row(ui, "Steering", (r.turn_rate / 3.0) as f32, &format!("{:.1}", r.turn_rate), INFO);
     meter_row(ui, "Landing legs", (r.max_landing_speed / 10.0) as f32, &format!("{:.0}", r.max_landing_speed), GOOD);
 
+    ui.add_space(6.0);
+    switch_row(ui, "Easy flying", &mut game.settings.easy_flying)
+        .on_hover_text("Endless fuel, an engine strong enough for any world, soft landings at any speed, and the rocket keeps itself level. Stars, black holes and gas giants are still dangerous!");
+    if game.settings.easy_flying {
+        ui.label(RichText::new("Endless fuel · lift off anywhere · no crash landings · self-levelling").size(11.0).color(GOOD));
+    }
+
     ui.add_space(8.0);
     let label = match game.launch_site() {
         Some(b) if terrain::has_solid_surface(b.kind) => format!("Launch from {}", b.name),
@@ -225,6 +232,7 @@ pub(super) fn flight_hud(ctx: &egui::Context, game: &mut Game) {
     enum Act {
         View,
         Brake,
+        Easy,
         Walk,
         Exit,
         Relaunch,
@@ -251,6 +259,12 @@ pub(super) fn flight_hud(ctx: &egui::Context, game: &mut Game) {
                 .clicked()
             {
                 act = Some(Act::Brake);
+            }
+            if icon_button(ui, Icon::Sparkles, 32.0, Look::Toggle(info.easy))
+                .on_hover_text("Easy flying: endless fuel, soft landings at any speed, and the rocket keeps itself level  (F)")
+                .clicked()
+            {
+                act = Some(Act::Easy);
             }
             let cockpit = info.view == FlightView::Cockpit;
             let (icon, tip) = if cockpit { (Icon::Rocket, "Switch to the outside view  (V)") } else { (Icon::Seat, "Switch to the cockpit  (V)") };
@@ -315,6 +329,7 @@ pub(super) fn flight_hud(ctx: &egui::Context, game: &mut Game) {
             (&["Shift", "Ctrl"], "throttle"),
             (&["Z", "X"], "full / off"),
             (&["R"], "brake"),
+            (&["F"], "easy"),
             (&["V"], "view"),
             (&["G"], "walk"),
         ]);
@@ -322,6 +337,7 @@ pub(super) fn flight_hud(ctx: &egui::Context, game: &mut Game) {
     match act {
         Some(Act::View) => game.key("v"),
         Some(Act::Brake) => game.key("r"),
+        Some(Act::Easy) => game.toggle_easy_flying(),
         Some(Act::Walk) => game.toggle_board(),
         Some(Act::Exit) => game.exit_mode(),
         Some(Act::Relaunch) => game.relaunch(),
