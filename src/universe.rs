@@ -66,6 +66,19 @@ impl CollisionMode {
     }
 }
 
+/// Compact copy of what the gravity inner loop needs, so it never touches the
+/// (large) `Body` structs.
+#[derive(Clone, Copy)]
+struct Probe {
+    pos: DVec3,
+    gm: f64,
+    radius: f64,
+}
+
+/// Particles are integrated on several threads above this many per thread.
+const PARTICLES_PER_THREAD: usize = 16_384;
+const MAX_ATTRACTORS: usize = 16;
+
 #[derive(Clone, Copy)]
 enum Contact {
     Touch(usize, usize),
@@ -92,7 +105,7 @@ pub struct Universe {
     pub log: Vec<String>,
     next_id: u64,
     contacts: Vec<Contact>,
-    scratch_pos: Vec<DVec3>,
+    scratch_probes: Vec<Probe>,
     scratch_acc: Vec<DVec3>,
 }
 
@@ -118,7 +131,7 @@ impl Universe {
             log: Vec::new(),
             next_id: 1,
             contacts: Vec::new(),
-            scratch_pos: Vec::new(),
+            scratch_probes: Vec::new(),
             scratch_acc: Vec::new(),
         }
     }
@@ -132,6 +145,7 @@ impl Universe {
         self.shockwaves.clear();
         self.time = 0.0;
         self.log.clear();
+        self.contacts.clear();
         self.paint.reset_all();
     }
 
@@ -286,56 +300,57 @@ impl Universe {
 
     fn compute_accelerations(&mut self) {
         let n = self.bodies.len();
-        self.scratch_pos.clear();
-        self.scratch_pos.extend(self.bodies.iter().map(|b| b.pos));
+        let g = self.g;
+        self.scratch_probes.clear();
+        self.scratch_probes.extend(self.bodies.iter().map(|b| Probe { pos: b.pos, gm: b.mass * g, radius: b.radius }));
         self.scratch_acc.clear();
         self.scratch_acc.resize(n, DVec3::ZERO);
-        let g = self.g;
-        let check_collisions = true;
+        let tidal = self.tidal_disruption && self.bodies.iter().any(|b| b.kind == BodyKind::BlackHole);
+        let bodies = &self.bodies;
+        let contacts = &mut self.contacts;
+        let probes = &self.scratch_probes[..];
         for i in 0..n {
-            let pi = self.scratch_pos[i];
-            let mi = self.bodies[i].mass * g;
-            let ri = self.bodies[i].radius;
-            let ki = self.bodies[i].kind;
-            let gi = self.bodies[i].ghost;
+            let pi = probes[i];
+            let (head, tail) = self.scratch_acc.split_at_mut(i + 1);
             let mut ai = DVec3::ZERO;
-            for j in (i + 1)..n {
-                let d = self.scratch_pos[j] - pi;
+            for (k, (pj, aj)) in probes[i + 1..].iter().zip(tail.iter_mut()).enumerate() {
+                let d = pj.pos - pi.pos;
                 let d2 = d.length_squared();
                 let s = d2 + 0.0025;
                 let inv = 1.0 / (s * s.sqrt());
-                let bj = &self.bodies[j];
-                ai += d * (bj.mass * g * inv);
-                self.scratch_acc[j] -= d * (mi * inv);
-                if !check_collisions {
-                    continue;
-                }
-                let rsum = ri + bj.radius;
+                ai += d * (pj.gm * inv);
+                *aj -= d * (pi.gm * inv);
+                // Everything below is the rare path: overlapping bodies or a black hole nearby.
+                let rsum = pi.radius + pj.radius;
                 if d2 < rsum * rsum {
-                    let ghosted = (gi > 0.0 || bj.ghost > 0.0) && !ki.is_stellar() && !bj.kind.is_stellar();
+                    let j = i + 1 + k;
+                    let (bi, bj) = (&bodies[i], &bodies[j]);
+                    let ghosted = (bi.ghost > 0.0 || bj.ghost > 0.0) && !bi.kind.is_stellar() && !bj.kind.is_stellar();
                     if !ghosted {
-                        self.contacts.push(Contact::Touch(i, j));
+                        contacts.push(Contact::Touch(i, j));
                     }
-                } else if self.tidal_disruption {
-                    let (bh, victim) = if ki == BodyKind::BlackHole && bj.kind != BodyKind::BlackHole {
+                } else if tidal {
+                    let j = i + 1 + k;
+                    let (ki, kj) = (bodies[i].kind, bodies[j].kind);
+                    let (bh, victim) = if ki == BodyKind::BlackHole && kj != BodyKind::BlackHole {
                         (i, j)
-                    } else if bj.kind == BodyKind::BlackHole && ki != BodyKind::BlackHole {
+                    } else if kj == BodyKind::BlackHole && ki != BodyKind::BlackHole {
                         (j, i)
                     } else {
                         continue;
                     };
-                    let (mb, rb) = (self.bodies[bh].mass, self.bodies[bh].radius);
-                    let v = &self.bodies[victim];
+                    let (mb, rb) = (bodies[bh].mass, bodies[bh].radius);
+                    let v = &bodies[victim];
                     if v.kind == BodyKind::NeutronStar {
                         continue;
                     }
                     let rt = v.radius * (2.0 * mb / v.mass.max(1e-6)).cbrt();
                     if rt > rb * 1.3 && d2 < rt * rt {
-                        self.contacts.push(Contact::Tidal { bh, victim });
+                        contacts.push(Contact::Tidal { bh, victim });
                     }
                 }
             }
-            self.scratch_acc[i] += ai;
+            head[i] += ai;
         }
         for (b, a) in self.bodies.iter_mut().zip(self.scratch_acc.iter()) {
             b.acc = *a;
@@ -672,7 +687,16 @@ impl Universe {
         let m = b.mass + s.mass;
         b.vel = (b.vel * b.mass + s.vel * s.mass) / m;
         b.temperature = ((b.temperature as f64 * b.mass + s.temperature as f64 * s.mass) / m) as f32 * 1.1;
-        b.radius = (b.radius.powi(3) + s.radius.powi(3)).cbrt();
+        if b.kind == BodyKind::Star && s.kind == BodyKind::Star {
+            b.radius = (b.radius.powi(3) + s.radius.powi(3)).cbrt();
+        } else if b.kind == BodyKind::Star {
+            // A star swallowing a (tiny, dense) neutron star barely grows.
+            b.radius *= (m / b.mass).cbrt();
+        } else {
+            // A neutron star stays compact however much it eats; adding the
+            // volumes would turn it into a star-sized (and blinding) ball.
+            b.radius = (b.radius * (m / b.mass).cbrt()).min(2.0);
+        }
         b.mass = m;
         b.flash = 3.0;
         b.update_star_colors();
@@ -757,6 +781,12 @@ impl Universe {
     fn update_supernovae(&mut self, dt: f64) {
         let mut explode = Vec::new();
         for (i, b) in self.bodies.iter_mut().enumerate() {
+            // Only stars explode: drop the countdown if the body was turned into
+            // something else (collapsed into a black hole, retyped in the inspector).
+            if b.kind != BodyKind::Star {
+                b.supernova_timer = None;
+                continue;
+            }
             if let Some(t) = b.supernova_timer.as_mut() {
                 *t -= dt;
                 // pre-supernova pulsations
@@ -914,49 +944,42 @@ impl Universe {
         }
         // The most massive bodies act as attractors / absorbers for particles.
         let mut idx: Vec<usize> = (0..self.bodies.len()).collect();
-        idx.sort_by(|a, b| self.bodies[*b].mass.partial_cmp(&self.bodies[*a].mass).unwrap());
-        idx.truncate(16);
-        let attractors: Vec<(Vec3, f32, f32, usize)> = idx
+        idx.sort_by(|a, b| self.bodies[*b].mass.total_cmp(&self.bodies[*a].mass));
+        idx.truncate(MAX_ATTRACTORS);
+        let attractors: Vec<Attractor> = idx
             .iter()
             .map(|&i| {
                 let b = &self.bodies[i];
-                (b.pos.as_vec3(), (b.mass * self.g) as f32, (b.radius * b.radius) as f32, i)
+                Attractor { pos: b.pos.as_vec3(), gm: (b.mass * self.g) as f32, r2: (b.radius * b.radius) as f32 }
             })
             .collect();
         let sub = ((dt / 0.02).ceil() as usize).clamp(1, 8);
-        let h = dt / sub as f32;
-        let drag = (-0.12 * h).exp();
-        let mut fed = vec![0u32; attractors.len()];
-        for p in &mut self.particles {
-            for _ in 0..sub {
-                if p.flags & P_GRAVITY != 0 {
-                    let mut acc = Vec3::ZERO;
-                    for (k, (apos, gm, r2, _)) in attractors.iter().enumerate() {
-                        let d = *apos - p.pos;
-                        let d2 = d.length_squared();
-                        if d2 < *r2 {
-                            p.life = -1.0;
-                            fed[k] += 1;
-                            break;
-                        }
-                        let s = d2 + 0.05;
-                        acc += d * (*gm / (s * s.sqrt()));
+        let n = self.particles.len();
+        let threads = if n >= 2 * PARTICLES_PER_THREAD { worker_threads().min(n / PARTICLES_PER_THREAD) } else { 1 };
+        let fed = if threads <= 1 {
+            integrate_particles(&mut self.particles, &attractors, sub, dt)
+        } else {
+            // Particles don't interact with each other, so chunks are independent
+            // and the result is identical to the single-threaded one.
+            let chunk = n.div_ceil(threads);
+            let attractors = &attractors[..];
+            std::thread::scope(|scope| {
+                let workers: Vec<_> =
+                    self.particles.chunks_mut(chunk).map(|c| scope.spawn(move || integrate_particles(c, attractors, sub, dt))).collect();
+                let mut fed = [0u32; MAX_ATTRACTORS];
+                for w in workers {
+                    let part = w.join().expect("particle worker panicked");
+                    for (total, n) in fed.iter_mut().zip(part) {
+                        *total += n;
                     }
-                    p.vel += acc * h;
                 }
-                if p.flags & P_DRAG != 0 {
-                    p.vel *= drag;
-                }
-                p.pos += p.vel * h;
-            }
-            if p.flags & P_IMMORTAL == 0 {
-                p.life -= dt;
-            }
-        }
+                fed
+            })
+        };
         self.particles.retain(|p| p.life > 0.0);
         for (k, n) in fed.iter().enumerate() {
             if *n > 0 {
-                let b = &mut self.bodies[attractors[k].3];
+                let b = &mut self.bodies[idx[k]];
                 if b.kind == BodyKind::BlackHole {
                     b.feeding = (b.feeding + *n as f32 * 0.002).min(5.0);
                 }
@@ -972,7 +995,7 @@ impl Universe {
     /// Returns sampled points and the index of the body it would hit (if any).
     pub fn predict(&self, pos: DVec3, vel: DVec3, horizon: f64, steps: usize) -> (Vec<DVec3>, Option<usize>) {
         let mut idx: Vec<usize> = (0..self.bodies.len()).collect();
-        idx.sort_by(|a, b| self.bodies[*b].mass.partial_cmp(&self.bodies[*a].mass).unwrap());
+        idx.sort_by(|a, b| self.bodies[*b].mass.total_cmp(&self.bodies[*a].mass));
         idx.truncate(24);
         let mut bp: Vec<DVec3> = idx.iter().map(|&i| self.bodies[i].pos).collect();
         let mut bv: Vec<DVec3> = idx.iter().map(|&i| self.bodies[i].vel).collect();
@@ -1036,6 +1059,55 @@ impl Universe {
         (out, None)
     }
 
+}
+
+#[derive(Clone, Copy)]
+struct Attractor {
+    pos: Vec3,
+    gm: f32,
+    /// Radius squared: particles inside are absorbed.
+    r2: f32,
+}
+
+fn worker_threads() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8))
+}
+
+/// Advance a slice of particles by `dt` in `sub` sub-steps. Returns how many
+/// particles each attractor swallowed.
+fn integrate_particles(particles: &mut [Particle], attractors: &[Attractor], sub: usize, dt: f32) -> [u32; MAX_ATTRACTORS] {
+    let h = dt / sub as f32;
+    let drag = (-0.12 * h).exp();
+    let mut fed = [0u32; MAX_ATTRACTORS];
+    for p in particles {
+        'steps: for _ in 0..sub {
+            if p.flags & P_GRAVITY != 0 {
+                let mut acc = Vec3::ZERO;
+                for (k, a) in attractors.iter().enumerate() {
+                    let d = a.pos - p.pos;
+                    let d2 = d.length_squared();
+                    if d2 < a.r2 {
+                        // Swallowed: count it once and stop integrating it.
+                        p.life = -1.0;
+                        fed[k] += 1;
+                        break 'steps;
+                    }
+                    let s = d2 + 0.05;
+                    acc += d * (a.gm / (s * s.sqrt()));
+                }
+                p.vel += acc * h;
+            }
+            if p.flags & P_DRAG != 0 {
+                p.vel *= drag;
+            }
+            p.pos += p.vel * h;
+        }
+        if p.flags & P_IMMORTAL == 0 {
+            p.life -= dt;
+        }
+    }
+    fed
 }
 
 #[cfg(test)]
@@ -1131,6 +1203,76 @@ mod tests {
         }
         assert_eq!(u.bodies.len(), 1);
         assert!(u.log.iter().any(|l| l.contains("spaghettified")));
+    }
+
+    #[test]
+    fn collapsed_star_does_not_go_supernova() {
+        let mut u = Universe::new("t", 8);
+        let s = u.new_body("Big", BodyKind::Star, DVec3::ZERO, DVec3::ZERO).with_mass_radius(20000.0, 20.0);
+        let id = u.add(s);
+        assert!(u.trigger_supernova(id, 0.5));
+        // ...then it gets turned into a black hole before the countdown ends.
+        let b = u.get_mut(id).unwrap();
+        b.kind = BodyKind::BlackHole;
+        let mass = b.mass;
+        for _ in 0..90 {
+            u.update(1.0 / 60.0, 1.0, false);
+        }
+        let b = u.get(id).unwrap();
+        assert_eq!(b.mass, mass, "a black hole must not explode");
+        assert!(b.supernova_timer.is_none());
+        assert!(u.shockwaves.is_empty());
+    }
+
+    #[test]
+    fn neutron_star_stays_compact_after_eating_a_star() {
+        let mut u = Universe::new("t", 9);
+        let ns = u.new_body("Pulsar", BodyKind::NeutronStar, DVec3::ZERO, DVec3::ZERO).with_mass_radius(9000.0, 0.8);
+        let id = u.add(ns);
+        let s = u.new_body("Star", BodyKind::Star, DVec3::new(5.0, 0.0, 0.0), DVec3::ZERO).with_mass_radius(3000.0, 8.0);
+        u.add(s);
+        for _ in 0..10 {
+            u.update(1.0 / 60.0, 1.0, false);
+        }
+        assert_eq!(u.bodies.len(), 1);
+        let b = u.get(id).unwrap();
+        assert!((b.mass - 12000.0).abs() < 1e-6);
+        assert!(b.radius < 2.5, "neutron star ballooned to radius {}", b.radius);
+    }
+
+    #[test]
+    fn particles_integrate_identically_on_many_threads() {
+        let attractors = [
+            Attractor { pos: Vec3::ZERO, gm: 5000.0, r2: 4.0 },
+            Attractor { pos: Vec3::new(60.0, 0.0, 0.0), gm: 800.0, r2: 1.0 },
+        ];
+        let rng = Rng::new(11);
+        let make = || -> Vec<Particle> {
+            (0..PARTICLES_PER_THREAD * 3 + 17)
+                .map(|k| Particle {
+                    pos: (rng.unit() * rng.range(1.0, 90.0)).as_vec3(),
+                    vel: (rng.unit() * 6.0).as_vec3(),
+                    color: Vec3::ONE,
+                    size: 0.1,
+                    life: 5.0,
+                    max_life: 5.0,
+                    flags: if k % 3 == 0 { P_GRAVITY | P_DRAG } else { P_GRAVITY },
+                })
+                .collect()
+        };
+        let mut u = Universe::new("t", 12);
+        let a = u.new_body("A", BodyKind::BlackHole, DVec3::ZERO, DVec3::ZERO).with_mass_radius(5000.0, 2.0);
+        let b = u.new_body("B", BodyKind::Rocky, DVec3::new(60.0, 0.0, 0.0), DVec3::ZERO).with_mass_radius(800.0, 1.0);
+        u.add(a);
+        u.add(b);
+        u.particles = make();
+        let mut reference = u.particles.clone();
+        let fed = integrate_particles(&mut reference, &attractors, 3, 0.05);
+        reference.retain(|p| p.life > 0.0);
+        assert!(fed[0] > 0, "expected some particles to fall into the hole");
+        u.update_particles(0.05);
+        assert_eq!(u.particles.len(), reference.len());
+        assert!(u.particles.iter().zip(&reference).all(|(x, y)| x.pos == y.pos && x.vel == y.vel && x.life == y.life));
     }
 
     #[test]

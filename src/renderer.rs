@@ -649,15 +649,9 @@ impl Renderer {
         let f = &self.frames[fi];
         unsafe { device.wait_for_fences(&[f.fence], true, u64::MAX)? };
 
-        let (image_index, _) = match unsafe {
-            self.ctx.swapchain_fn.acquire_next_image(self.swapchain.swapchain, u64::MAX, f.image_available, vk::Fence::null())
-        } {
-            Ok(r) => r,
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => return Ok(false),
-            Err(e) => return Err(e.into()),
-        };
-
         // egui texture uploads (font atlas etc.) - rare, so a full idle is fine.
+        // egui hands each delta over exactly once, so apply it before anything
+        // that can bail out of this frame (an out-of-date swapchain mid-resize).
         if !textures.set.is_empty() {
             unsafe { device.device_wait_idle()? };
             let egui = self.egui.as_mut().unwrap();
@@ -667,6 +661,17 @@ impl Renderer {
                 }
             }
         }
+
+        let (image_index, _) = match unsafe {
+            self.ctx.swapchain_fn.acquire_next_image(self.swapchain.swapchain, u64::MAX, f.image_available, vk::Fence::null())
+        } {
+            Ok(r) => r,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                self.free_textures(textures)?;
+                return Ok(false);
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         unsafe { device.reset_fences(&[f.fence])? };
         let f = &self.frames[fi];
@@ -940,14 +945,19 @@ impl Renderer {
                 self.capture = false;
             }
 
-            if !textures.free.is_empty() {
-                device.device_wait_idle()?;
-                for id in &textures.free {
-                    self.egui.as_mut().unwrap().free_texture(*id)?;
-                }
-            }
+            self.free_textures(textures)?;
             Ok(ok)
         }
+    }
+
+    fn free_textures(&mut self, textures: &egui::TexturesDelta) -> Result<()> {
+        if !textures.free.is_empty() {
+            unsafe { self.ctx.device.device_wait_idle()? };
+            for id in &textures.free {
+                self.egui.as_mut().unwrap().free_texture(*id)?;
+            }
+        }
+        Ok(())
     }
 }
 

@@ -132,6 +132,7 @@ struct State {
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     game: Game,
+    frame_data: gpu_types::FrameData,
     last: Instant,
     frame_count: u32,
     fps_timer: f64,
@@ -249,6 +250,7 @@ impl State {
             egui_ctx,
             egui_state,
             game,
+            frame_data: gpu_types::FrameData::new(),
             last: Instant::now(),
             frame_count: 0,
             fps_timer: 0.0,
@@ -272,6 +274,9 @@ impl State {
         if self.renderer.needs_resize {
             let size = self.window.inner_size();
             if size.width == 0 || size.height == 0 {
+                // Minimised: nothing to draw and no vsync to pace us, so don't spin a core.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                self.last = Instant::now();
                 return Ok(());
             }
             self.renderer.resize(size.width, size.height)?;
@@ -315,7 +320,7 @@ impl State {
             hovered: self.game.hovered,
             time: self.game.real_time as f32,
         };
-        let frame = scene::build_frame(&self.game.universe, &cam, &opts, &self.game.preview);
+        scene::build_frame(&mut self.frame_data, &self.game.universe, &cam, &opts, &self.game.preview);
         let prims = self.egui_ctx.tessellate(output.shapes, output.pixels_per_point);
 
         self.frame_count += 1;
@@ -323,7 +328,7 @@ impl State {
         if want_shot {
             self.renderer.capture = true;
         }
-        let ok = self.renderer.render(&frame, &mut self.game.universe.paint, &prims, &output.textures_delta, output.pixels_per_point)?;
+        let ok = self.renderer.render(&self.frame_data, &mut self.game.universe.paint, &prims, &output.textures_delta, output.pixels_per_point)?;
         if !ok {
             self.renderer.needs_resize = true;
         }
@@ -444,9 +449,11 @@ impl ApplicationHandler for App {
                     st.game.scroll(delta * 8.0);
                 }
             }
+            WindowEvent::Focused(false) => st.game.focus_lost(),
             WindowEvent::ModifiersChanged(m) => st.game.set_shift(m.state().shift_key()),
             WindowEvent::KeyboardInput { event, .. } => {
-                if resp.consumed || st.egui_ctx.egui_wants_keyboard_input() || event.state != ElementState::Pressed {
+                // Ignore auto-repeat: holding Space or B must not toggle pause / fire barrages 30x a second.
+                if resp.consumed || st.egui_ctx.egui_wants_keyboard_input() || event.state != ElementState::Pressed || event.repeat {
                     return;
                 }
                 let key = match &event.logical_key {

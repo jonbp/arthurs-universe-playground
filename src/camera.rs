@@ -69,7 +69,7 @@ impl Camera {
         let up = right.cross(f);
         let k = self.distance * 0.0015;
         self.target += (-right * dx + up * dy) * k;
-        if let Some(_) = self.follow.take() {
+        if self.follow.take().is_some() {
             self.follow_offset = DVec3::ZERO;
         }
     }
@@ -148,9 +148,7 @@ impl CameraFrame {
 
     /// Apparent radius in pixels of a sphere.
     pub fn screen_radius(&self, p: DVec3, r: f64) -> f32 {
-        let d = (p - self.eye).length().max(1e-6);
         let depth = (p - self.eye).as_vec3().dot(self.fwd).max(1e-4);
-        let _ = d;
         (r as f32 / depth) / self.tan_half * self.size.y * 0.5
     }
 

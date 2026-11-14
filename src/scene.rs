@@ -26,12 +26,15 @@ pub struct Polyline {
     pub fade: bool,
 }
 
-pub fn build_frame(u: &Universe, cam: &CameraFrame, opts: &SceneOptions, overlays: &[Polyline]) -> FrameData {
-    let mut bodies_hi = Vec::new();
-    let mut bodies_lo = Vec::new();
-    let mut rings = Vec::new();
-    let mut particles = Vec::with_capacity(u.particles.len() + 64);
-    let mut lines = Vec::new();
+/// Fill `frame` (reusing its allocations) with everything needed to draw the universe.
+pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts: &SceneOptions, overlays: &[Polyline]) {
+    let FrameData { bodies: bodies_hi, bodies_lo, rings, particles, lines, .. } = frame;
+    bodies_hi.clear();
+    bodies_lo.clear();
+    rings.clear();
+    particles.clear();
+    particles.reserve(u.particles.len() + 64);
+    lines.clear();
 
     // ---- lights ----
     let mut lights: Vec<(Vec3, f32, Vec3)> = Vec::new(); // rel pos, radius, color*intensity
@@ -43,7 +46,7 @@ pub fn build_frame(u: &Universe, cam: &CameraFrame, opts: &SceneOptions, overlay
     for f in &u.flashes {
         lights.push((cam.rel(f.pos), 1.0, f.color * f.intensity));
     }
-    lights.sort_by(|a, b| b.2.length().partial_cmp(&a.2.length()).unwrap());
+    lights.sort_by(|a, b| b.2.length_squared().total_cmp(&a.2.length_squared()));
     lights.truncate(MAX_LIGHTS);
 
     // ---- bodies ----
@@ -142,7 +145,7 @@ pub fn build_frame(u: &Universe, cam: &CameraFrame, opts: &SceneOptions, overlay
         }
     }
     let hi_count = bodies_hi.len() as u32;
-    bodies_hi.extend(bodies_lo);
+    bodies_hi.append(bodies_lo);
 
     // ---- overlays ----
     for pl in overlays {
@@ -199,12 +202,13 @@ pub fn build_frame(u: &Universe, cam: &CameraFrame, opts: &SceneOptions, overlay
         globals.light_pos[i] = [p.x, p.y, p.z, *r];
         globals.light_col[i] = [c.x, c.y, c.z, 0.0];
     }
-    black_holes.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    black_holes.sort_by(|a, b| b.0.total_cmp(&a.0));
     black_holes.truncate(MAX_BLACK_HOLES);
     globals.params[2] = black_holes.len() as f32;
     for (i, (_, bh)) in black_holes.iter().enumerate() {
         globals.black_holes[i] = *bh;
     }
 
-    FrameData { globals, bodies: bodies_hi, hi_count, rings, particles, lines }
+    frame.globals = globals;
+    frame.hi_count = hi_count;
 }

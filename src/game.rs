@@ -207,7 +207,7 @@ impl Game {
                     .max_by(|a, c| {
                         let la = a.luminosity() as f64 / (a.pos - p).length_squared().max(1.0);
                         let lc = c.luminosity() as f64 / (c.pos - p).length_squared().max(1.0);
-                        la.partial_cmp(&lc).unwrap()
+                        la.total_cmp(&lc)
                     });
                 if let Some(s) = star {
                     let to_star = (s.pos - p).normalize();
@@ -414,6 +414,12 @@ impl Game {
                 }
             }
             (0, false) => {
+                // A release whose press went to the UI (or another window) is not a
+                // scene click: without this, pressing any panel button would also
+                // click "through" it and deselect / fire at whatever is behind.
+                if !self.left_down {
+                    return;
+                }
                 self.left_down = false;
                 if self.spawn_anchor.is_some() {
                     self.finish_spawn(cam);
@@ -439,6 +445,17 @@ impl Game {
         }
     }
 
+    /// The window lost focus: forget held buttons, since their releases won't arrive.
+    pub fn focus_lost(&mut self) {
+        self.left_down = false;
+        self.right_down = false;
+        self.middle_down = false;
+        self.shift = false;
+        self.painting = false;
+        self.spawn_anchor = None;
+        self.spawn_current = None;
+    }
+
     pub fn track_spawn_drag(&mut self, cam: &CameraFrame) {
         if self.spawn_anchor.is_some() && self.left_down {
             if let Some(p) = self.plane_hit(cam, self.mouse) {
@@ -454,7 +471,7 @@ impl Game {
             .iter()
             .filter(|b| b.kind.paintable())
             .filter_map(|b| ray_sphere(cam.eye, dir, b.pos, b.radius * 1.02).map(|t| (t, b.id)))
-            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
+            .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(_, id)| id)
     }
 
@@ -546,9 +563,7 @@ impl Game {
             (cam_dir + self.universe.rng.unit() * 0.08).normalize()
         });
         let start = tpos - dir * (tr * 4.0 + radius * 3.0 + 12.0);
-        let mut v = tvel + dir * self.smash.speed;
-        // compensate for the target's gravity bending the path a little
-        v += (tpos - start).normalize() * 0.0;
+        let v = tvel + dir * self.smash.speed;
         self.spawn_counter += 1;
         let name = format!("Projectile {}", self.spawn_counter);
         let mut b = self.universe.new_body(&name, kind, start, v);
@@ -606,6 +621,7 @@ impl Game {
         b.ring = None;
         b.feeding = 2.0;
         b.flash = 2.0;
+        b.supernova_timer = None;
         if let Some(l) = b.paint_layer.take() {
             self.universe.paint.release(l);
         }
@@ -658,6 +674,7 @@ impl Game {
                 self.selected = None;
                 self.camera.follow = None;
                 self.spawn_anchor = None;
+                self.spawn_current = None;
             }
             "=" | "+" | "]" => self.time_scale = (self.time_scale * 2.0).min(1000.0),
             "-" | "[" => self.time_scale = (self.time_scale / 2.0).max(0.01),
@@ -777,6 +794,32 @@ mod tests {
             g.update(1.0 / 60.0, &cam, false);
         }
         assert!(g.universe.log.iter().any(|l| l.contains("Jupiter") && (l.contains("merged") || l.contains("smashed"))), "{:?}", g.universe.log);
+    }
+
+    #[test]
+    fn release_without_press_is_not_a_click() {
+        // Pressing a UI button swallows the press, but the release still reaches the game.
+        let (mut g, cam) = setup(Preset::SolarSystem);
+        let sun = g.universe.bodies.iter().find(|b| b.name == "Sun").unwrap();
+        let (p, id) = (cam.project(sun.pos).unwrap(), sun.id);
+        click(&mut g, &cam, p);
+        assert_eq!(g.selected, Some(id));
+        g.mouse_move(Vec2::new(5.0, 5.0));
+        g.mouse_button(0, false, &cam);
+        assert_eq!(g.selected, Some(id), "a bare release must not deselect");
+        g.tool = Tool::Smash;
+        let n = g.universe.bodies.len();
+        g.mouse_move(p);
+        g.mouse_button(0, false, &cam);
+        assert_eq!(g.universe.bodies.len(), n, "a bare release must not fire a projectile");
+    }
+
+    #[test]
+    fn collapse_cancels_supernova() {
+        let (mut g, _) = setup(Preset::Supernova);
+        let id = g.universe.bodies.iter().find(|b| b.supernova_timer.is_some()).unwrap().id;
+        g.collapse_to_black_hole(id);
+        assert!(g.universe.get(id).unwrap().supernova_timer.is_none());
     }
 
     #[test]

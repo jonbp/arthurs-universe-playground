@@ -70,7 +70,11 @@ impl Brush {
 pub struct PaintStore {
     pub layers: Vec<Vec<[u8; 4]>>,
     pub dirty: Vec<bool>,
+    /// Layers that have been painted on since they were last neutral.
+    touched: Vec<bool>,
     free: Vec<u32>,
+    /// (sin, cos) of the longitude of every texel column.
+    columns: Vec<(f32, f32)>,
 }
 
 impl PaintStore {
@@ -78,7 +82,13 @@ impl PaintStore {
         let layers = vec![vec![NEUTRAL; PAINT_W * PAINT_H]; MAX_LAYERS];
         // Layer 0 is reserved as the "unpainted" neutral layer.
         let free = (1..MAX_LAYERS as u32).rev().collect();
-        PaintStore { layers, dirty: vec![false; MAX_LAYERS], free }
+        let columns = (0..PAINT_W)
+            .map(|i| {
+                let u = (i as f32 + 0.5) / PAINT_W as f32;
+                ((u - 0.5) * std::f32::consts::TAU).sin_cos()
+            })
+            .collect();
+        PaintStore { layers, dirty: vec![false; MAX_LAYERS], touched: vec![false; MAX_LAYERS], free, columns }
     }
 
     pub fn alloc(&mut self) -> Option<u32> {
@@ -89,8 +99,7 @@ impl PaintStore {
         if layer == 0 || layer as usize >= MAX_LAYERS {
             return;
         }
-        self.layers[layer as usize].fill(NEUTRAL);
-        self.dirty[layer as usize] = true;
+        self.clear_layer(layer as usize);
         if !self.free.contains(&layer) {
             self.free.push(layer);
         }
@@ -98,10 +107,19 @@ impl PaintStore {
 
     pub fn reset_all(&mut self) {
         for l in 1..MAX_LAYERS {
-            self.layers[l].fill(NEUTRAL);
-            self.dirty[l] = true;
+            self.clear_layer(l);
         }
         self.free = (1..MAX_LAYERS as u32).rev().collect();
+    }
+
+    /// Back to neutral. Untouched layers are already neutral (here and on the
+    /// GPU), so they cost nothing: no 0.5 MB fill and no texture re-upload.
+    fn clear_layer(&mut self, l: usize) {
+        if self.touched[l] {
+            self.layers[l].fill(NEUTRAL);
+            self.dirty[l] = true;
+            self.touched[l] = false;
+        }
     }
 
 
@@ -118,15 +136,13 @@ impl PaintStore {
         let row0 = (((phi_c - radius) / std::f32::consts::PI) * PAINT_H as f32).floor().max(0.0) as usize;
         let row1 = (((phi_c + radius) / std::f32::consts::PI) * PAINT_H as f32).ceil().min(PAINT_H as f32) as usize;
         let data = &mut self.layers[layer as usize];
+        let columns = &self.columns;
         let mat = brush.material();
         for j in row0..row1 {
             let v = (j as f32 + 0.5) / PAINT_H as f32;
             let phi = v * std::f32::consts::PI;
             let (sp, cp) = phi.sin_cos();
-            for i in 0..PAINT_W {
-                let u = (i as f32 + 0.5) / PAINT_W as f32;
-                let theta = (u - 0.5) * std::f32::consts::TAU;
-                let (st, ct) = theta.sin_cos();
+            for (i, &(st, ct)) in columns.iter().enumerate() {
                 let p = Vec3::new(sp * ct, cp, sp * st);
                 let d = p.dot(c);
                 if d < cos_r {
@@ -164,6 +180,7 @@ impl PaintStore {
             }
         }
         self.dirty[layer as usize] = true;
+        self.touched[layer as usize] = true;
     }
 }
 

@@ -1061,6 +1061,7 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
     let Some(idx) = game.universe.index_of(id) else { return };
     let mut close = false;
     let mut action: Option<Action> = None;
+    let mut orphaned_layer: Option<u32> = None;
     let attractor = game.universe.dominant_attractor(game.universe.bodies[idx].pos, Some(id));
     let orbit = attractor.map(|a| {
         let c = &game.universe.bodies[a];
@@ -1120,6 +1121,12 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
                     let mut rng = crate::util::Rng::new(b.id.wrapping_mul(31) + kind as u64);
                     b.kind = kind;
                     b.surface = crate::body::Surface::for_kind(kind, &mut rng);
+                    // Only stars can be on a supernova countdown, and stars / black
+                    // holes have no paintable surface: give the paint layer back.
+                    b.supernova_timer = None;
+                    if !kind.paintable() {
+                        orphaned_layer = b.paint_layer.take();
+                    }
                     if kind == BodyKind::BlackHole {
                         b.radius = black_hole_radius(b.mass);
                         b.feeding = 1.0;
@@ -1207,7 +1214,7 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
                 b.update_star_colors();
             }
             slider_row(ui, "Spin", egui::Slider::new(&mut b.spin_rate, -3.0..=3.0));
-            slider_row(ui, "Axial tilt", egui::Slider::new(&mut b.tilt, -3.14..=3.14));
+            slider_row(ui, "Axial tilt", egui::Slider::new(&mut b.tilt, -std::f32::consts::PI..=std::f32::consts::PI));
 
             if !b.kind.is_stellar() {
                 section(ui, "Surface");
@@ -1273,6 +1280,9 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
 
     if close {
         game.selected = None;
+    }
+    if let Some(l) = orphaned_layer {
+        game.universe.paint.release(l);
     }
     match action {
         Some(Action::Follow) => game.focus(id),

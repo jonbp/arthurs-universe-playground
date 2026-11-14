@@ -65,4 +65,22 @@ pub struct FrameData {
     pub rings: Vec<GpuRing>,
     pub particles: Vec<GpuParticle>,
     pub lines: Vec<LineVertex>,
+    /// Scratch list of low-detail bodies, appended to `bodies` once the frame is built.
+    pub bodies_lo: Vec<GpuBody>,
+}
+
+impl FrameData {
+    /// An empty frame. Keep it around and refill it every frame so the (large)
+    /// particle and line buffers are allocated once, not 60 times a second.
+    pub fn new() -> FrameData {
+        FrameData {
+            globals: Globals::zeroed(),
+            bodies: Vec::new(),
+            hi_count: 0,
+            rings: Vec::new(),
+            particles: Vec::new(),
+            lines: Vec::new(),
+            bodies_lo: Vec::new(),
+        }
+    }
 }

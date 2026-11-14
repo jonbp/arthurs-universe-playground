@@ -686,7 +686,7 @@ pub fn build_custom(u: &mut Universe, p: &CustomParams) {
                 // (Galilean moons are ~1e-5..1e-4 of Jupiter) or they scatter each other.
                 let mm = if nm == 1 { mass * rng.range(0.002, 0.012) } else { mass * rng.range(2e-5, 1e-4) };
                 let mr = (radius * 0.18 * rng.range(0.7, 1.3)).max(0.2);
-                add_orbiting(u, pid, &mname, mk, mm, mr, md, rng.range(0.0, 6.28), rng.normal() * 0.05);
+                add_orbiting(u, pid, &mname, mk, mm, mr, md, rng.range(0.0, std::f64::consts::TAU), rng.normal() * 0.05);
             }
         }
     }
