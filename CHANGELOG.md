@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-14
+
 ### Added
 
 - **Save your universes.** In the universe menu, **Saved universes…** lets you save the current universe under a name and load or delete saves. A save keeps every body and its orbit, painted terrain, rings, the stars of a galaxy, physics settings, the camera and the time speed. Saving a name that already exists replaces it, and deleting needs a second click to confirm.
@@ -101,7 +103,8 @@ First public release.
 - Ten presets, including Theia Impact, Black Hole Feast, Supernova Countdown and Galaxy Collision.
 - Downloadable builds for Windows (x64), macOS (Apple Silicon, MoltenVK bundled) and Linux (x86_64), all with the app icon.
 
-[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.1.0...v1.2.0
