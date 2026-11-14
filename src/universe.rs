@@ -141,6 +141,11 @@ struct Probe {
     radius: f64,
 }
 
+/// Pieces of a shattered world smaller than this are dust (particles), not bodies.
+/// Without the cut-off, rubble kept smashing into ever more rubble of the same
+/// size, until one collision had filled the whole universe with weightless rocks.
+const MIN_FRAGMENT_RADIUS: f64 = 0.12;
+
 /// Particles are integrated on several threads above this many per thread.
 const PARTICLES_PER_THREAD: usize = 16_384;
 const MAX_ATTRACTORS: usize = 16;
@@ -763,7 +768,9 @@ impl Universe {
         }
 
         // Debris cloud and bright flash.
-        let count = (1500.0 + (s.radius + b.radius * big_destroy) * 900.0).min(9000.0) as usize;
+        // (Scaled down for rubble, so a pebble doesn't burst into a planet's worth of sparks.)
+        let rubble = s.radius.min(1.0).powi(2);
+        let count = ((1500.0 + (s.radius + b.radius * big_destroy) * 900.0) * rubble).min(9000.0) as usize;
         let dc1 = s.debris_color();
         let dc2 = b.debris_color();
         for k in 0..count {
@@ -812,9 +819,19 @@ impl Universe {
         let density_r = src.radius / src.mass.max(1e-6).cbrt();
         for (k, w) in weights.iter().enumerate() {
             let m = mass * w;
-            let r = (density_r * m.cbrt()).max(0.12);
+            // Same density as the body it came from: the pieces never take up more room than it did.
+            let r = density_r * m.cbrt();
             let dir = (n * 0.8 + self.rng.unit()).normalize();
             let mut pos = center + self.rng.unit() * src.radius * 0.7 + dir * r;
+            if r < MIN_FRAGMENT_RADIUS {
+                // Too small to be a world of its own: a puff of dust.
+                let color = src.debris_color();
+                for _ in 0..12 {
+                    let v = base_vel + (dir + self.rng.unit() * 0.5) * speed * self.rng.range(0.15, 0.6);
+                    self.emit(pos + self.rng.unit() * r, v, color, self.rng.rangef(0.03, 0.08), self.rng.rangef(3.0, 10.0), P_GRAVITY);
+                }
+                continue;
+            }
             // keep fragments out of the surviving body
             let to = pos - avoid.pos;
             let min_d = avoid.radius + r * 1.05;
@@ -1460,6 +1477,40 @@ mod tests {
         u.update_particles(0.05);
         assert_eq!(u.particles.len(), reference.len());
         assert!(u.particles.iter().zip(&reference).all(|(x, y)| x.pos == y.pos && x.vel == y.vel && x.life == y.life));
+    }
+
+    #[test]
+    fn rubble_grinds_to_dust_instead_of_multiplying() {
+        let mut u = Universe::new("t", 4);
+        let a = u.new_body("", BodyKind::Asteroid, DVec3::new(-2.0, 0.0, 0.0), DVec3::new(10.0, 0.0, 0.0)).with_mass_radius(0.01, 0.15);
+        let b = u.new_body("", BodyKind::Asteroid, DVec3::new(2.0, 0.0, 0.0), DVec3::new(-10.0, 0.0, 0.0)).with_mass_radius(0.01, 0.15);
+        u.add(a);
+        u.add(b);
+        let volume = |u: &Universe| u.bodies.iter().map(|b| b.radius.powi(3)).sum::<f64>();
+        let before = volume(&u);
+        for _ in 0..60 {
+            u.update(1.0 / 60.0, 1.0, false);
+        }
+        assert!(u.bodies.len() <= 2, "two pebbles became {} bodies", u.bodies.len());
+        assert!(volume(&u) <= before * 1.001, "the pieces are bigger than what broke");
+        assert!(!u.particles.is_empty(), "expected a puff of dust");
+    }
+
+    #[test]
+    fn planet_smash_does_not_fill_the_universe_with_rubble() {
+        // At some speeds this used to set off a chain reaction: fragments shattered
+        // into more fragments until the body limit was full of weightless rocks.
+        let mut u = Universe::new("t", 1);
+        presets::build(&mut u, Preset::HeadOn);
+        let mut most = 0;
+        for _ in 0..120 {
+            u.update(1.0 / 60.0, 100.0, false);
+            most = most.max(u.bodies.len());
+        }
+        // A few dozen pieces at the height of it, settling to a handful.
+        assert!(most < 200, "the smash grew to {most} bodies");
+        assert!(u.bodies.len() < 40, "{} bodies were still left at the end", u.bodies.len());
+        assert!(u.bodies.iter().all(|b| b.mass > 1e-6), "weightless fragments were left behind");
     }
 
     #[test]
