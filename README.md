@@ -77,6 +77,7 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 | `Del` | Delete selection |
 | `T` / `L` / `H` | Trails / labels / hide UI |
 | `M` | Mute or unmute sound |
+| Power button (top right) | Quit (your universe is saved automatically) |
 | `F11` | Fullscreen |
 
 Flying (Fly tool, then click a world or press **Launch**):

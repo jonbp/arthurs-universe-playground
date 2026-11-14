@@ -866,6 +866,9 @@ fn view_bar(ctx: &egui::Context, game: &mut Game) {
             if icon_button(ui, Icon::EyeOff, 36.0, Look::Plain).on_hover_text("Hide interface  (H)").clicked() {
                 game.show_ui = false;
             }
+            if icon_button(ui, Icon::Power, 36.0, Look::Plain).on_hover_text("Quit  (your universe is saved automatically)").clicked() {
+                game.quit_requested = true;
+            }
         });
     });
 }

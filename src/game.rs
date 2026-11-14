@@ -88,6 +88,8 @@ pub struct Game {
     pub custom: CustomParams,
     pub show_custom: bool,
     pub show_help: bool,
+    /// The Quit button was pressed; main.rs exits (autosaving) at the end of the frame.
+    pub quit_requested: bool,
     pub glyph_test: bool,
     pub preset: Preset,
     pub real_time: f64,
@@ -148,6 +150,7 @@ impl Game {
             custom: CustomParams::default(),
             show_custom: false,
             show_help: false,
+            quit_requested: false,
             glyph_test: false,
             preset: Preset::SolarSystem,
             real_time: 0.0,

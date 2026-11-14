@@ -464,6 +464,10 @@ impl State {
         let scene_has_pointer = !self.egui_ctx.egui_wants_pointer_input() && !self.egui_ctx.is_pointer_over_egui();
         self.game.track_spawn_drag(&cam);
         self.game.update(dt, &cam, scene_has_pointer);
+        if self.game.quit_requested {
+            // Same path as closing the window: `exiting` saves settings and the autosave.
+            event_loop.exit();
+        }
         let ui_clicked = !scene_has_pointer && self.egui_ctx.input(|i| i.pointer.primary_clicked());
         self.sound.update(&mut self.game, &cam, dt, ui_clicked);
 

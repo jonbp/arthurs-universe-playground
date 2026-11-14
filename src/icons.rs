@@ -91,10 +91,11 @@ pub enum Icon {
     SpeakerOff,
     Music,
     Monitor,
+    Power,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 75] = [
+    pub const ALL: [Icon; 76] = [
         Icon::Cursor,
         Icon::SpawnPlanet,
         Icon::Brush,
@@ -170,6 +171,7 @@ impl Icon {
         Icon::SpeakerOff,
         Icon::Music,
         Icon::Monitor,
+        Icon::Power,
     ];
 
     pub fn name(self) -> String {
@@ -851,6 +853,11 @@ fn draw(icon: Icon, p: &Pen) {
             p.closed(&[(3.0, 4.5), (21.0, 4.5), (21.0, 16.0), (3.0, 16.0)]);
             p.line(&[(12.0, 16.0), (12.0, 20.0)]);
             p.line(&[(8.0, 20.0), (16.0, 20.0)]);
+        }
+        Power => {
+            // A ring broken at the top, with the switch line through the gap.
+            p.arc((12.0, 13.0), 8.0, -60.0, 240.0);
+            p.line(&[(12.0, 3.0), (12.0, 12.0)]);
         }
     }
 }
