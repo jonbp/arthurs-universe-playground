@@ -28,12 +28,12 @@ A space sandbox written in **Rust + Vulkan**. Start with the Solar System, then:
 
 | | |
 |---|---|
-| ![A supermassive black hole bending the light of its accretion disk](docs/screenshots/black-hole.jpg) | ![Two galaxies colliding, throwing out tidal tails](docs/screenshots/galaxy-collision.jpg) |
-| **Black hole:** lensing, a Doppler-beamed accretion disk and a photon ring | **Galaxy collision:** tens of thousands of stars and their tidal tails |
+| ![A supermassive black hole bending the light of its accretion disk](docs/screenshots/black-hole.jpg) | ![Two galaxies mid-collision, their spiral arms tangling into tidal tails](docs/screenshots/galaxy-collision.jpg) |
+| **Black hole:** lensing, a Doppler-beamed accretion disk and a photon ring | **Galaxy collision:** 68,000 stars, two cores and the tidal tails they fling out |
 | ![A rocket lifting off from Earth, with the flight panel below](docs/screenshots/flying.jpg) | ![Standing on Mars, with Phobos overhead and the conditions there](docs/screenshots/walking.jpg) |
 | **Flying:** lift off from any solid world under real gravity | **Walking:** stand on Mars and see what it's like there |
-| ![A blue supergiant's supernova blast wave](docs/screenshots/supernova.jpg) | |
-| **Supernova:** the blast wave, with a neutron star left behind | |
+| ![A blue supergiant's supernova blast wave](docs/screenshots/supernova.jpg) | ![Theia smashing into the young Earth, leaving it molten and surrounded by debris](docs/screenshots/planet-smash.jpg) |
+| **Supernova:** the blast wave, with a neutron star left behind | **Smash planets:** Theia hits the young Earth and shatters into glowing debris |
 
 ## Download
 
