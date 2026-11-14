@@ -15,4 +15,8 @@ struct Globals {
     light_col: array<vec4<f32>, 8>,
     // xy = screen uv, z = horizon radius in uv-y units, w = 1 if visible
     black_holes: array<vec4<f32>, 8>,
+    // rgb = atmosphere colour around the camera, a = how much it hides the stars
+    sky: vec4<f32>,
+    // xyz = "up" at the camera, w = sunlight reaching solid models (0 in a planet's shadow)
+    sky_up: vec4<f32>,
 };

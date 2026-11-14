@@ -4,10 +4,12 @@ use glam::{DVec3, Vec2, Vec4};
 
 use crate::body::{black_hole_radius, Body, BodyKind, Ring};
 use crate::camera::{ray_sphere, Camera, CameraFrame};
+use crate::explore::Mode;
 use crate::paint::Brush;
 use crate::presets::{self, CustomParams, Preset};
 use crate::scene::Polyline;
 use crate::universe::Universe;
+use crate::update::Updater;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
@@ -15,16 +17,20 @@ pub enum Tool {
     Spawn,
     Terraform,
     Smash,
+    Fly,
+    Walk,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 4] = [Tool::Select, Tool::Spawn, Tool::Terraform, Tool::Smash];
+    pub const ALL: [Tool; 6] = [Tool::Select, Tool::Spawn, Tool::Terraform, Tool::Smash, Tool::Fly, Tool::Walk];
     pub fn label(self) -> &'static str {
         match self {
             Tool::Select => "Select",
             Tool::Spawn => "Spawn",
             Tool::Terraform => "Terraform",
             Tool::Smash => "Smash",
+            Tool::Fly => "Fly",
+            Tool::Walk => "Walk",
         }
     }
     pub fn hint(self) -> &'static str {
@@ -33,6 +39,8 @@ impl Tool {
             Tool::Spawn => "Click to place a body in orbit. Click-and-drag to fling it with your own velocity (watch the predicted path).",
             Tool::Terraform => "Paint on a planet's surface: raise continents, dig oceans, add lava, ice or forests.",
             Tool::Smash => "Click a planet to hurl a projectile at it.",
+            Tool::Fly => "Pick a rocket, then click a world to launch from that spot.",
+            Tool::Walk => "Click a rocky world to stand on it and see what it is like there.",
         }
     }
 }
@@ -86,6 +94,15 @@ pub struct Game {
     pub preset: Preset,
     pub real_time: f64,
     pub fps: f32,
+    /// Sandbox, flying a rocket, or walking on a world (see `explore.rs`).
+    pub mode: Mode,
+    /// The rocket picked in the hangar (index into `rocket::ROCKETS`).
+    pub rocket: usize,
+    /// Keys currently held down, for steering.
+    pub(crate) keys: std::collections::HashSet<String>,
+    /// Time scale to go back to when flight / walking ends.
+    pub(crate) saved_time_scale: Option<f64>,
+    pub updater: Updater,
     spawn_counter: u32,
     // input state
     pub mouse: Vec2,
@@ -139,6 +156,11 @@ impl Game {
             preset: Preset::SolarSystem,
             real_time: 0.0,
             fps: 60.0,
+            mode: Mode::Sandbox,
+            rocket: 0,
+            keys: std::collections::HashSet::new(),
+            saved_time_scale: None,
+            updater: Updater::disabled(),
             spawn_counter: 0,
             mouse: Vec2::ZERO,
             left_down: false,
@@ -157,7 +179,16 @@ impl Game {
         g
     }
 
+    /// Back to the plain sandbox before the universe is replaced.
+    fn end_trip(&mut self) {
+        self.mode = Mode::Sandbox;
+        self.saved_time_scale = None;
+        self.universe.ship = None;
+        self.keys.clear();
+    }
+
     pub fn load_preset(&mut self, p: Preset) {
+        self.end_trip();
         self.preset = p;
         self.universe.collisions = crate::universe::CollisionMode::Realistic;
         self.universe.trail_interval = 1.0;
@@ -173,6 +204,7 @@ impl Game {
     }
 
     pub fn load_custom(&mut self) {
+        self.end_trip();
         let params = self.custom.clone();
         self.universe.collisions = crate::universe::CollisionMode::Realistic;
         presets::build_custom(&mut self.universe, &params);
@@ -227,14 +259,20 @@ impl Game {
 
     pub fn update(&mut self, dt: f64, cam: &CameraFrame, scene_has_pointer: bool) {
         self.real_time += dt;
+        self.preview.clear();
+        self.mode_pre_sim(dt);
+        let before = self.universe.time;
         self.universe.update(dt, self.time_scale, self.paused);
+        self.mode_post_sim(dt, self.universe.time - before);
         if let Some(id) = self.selected {
             if self.universe.get(id).is_none() {
                 self.selected = None;
             }
         }
-        let follow_pos = self.camera.follow.and_then(|id| self.universe.get(id)).map(|b| b.pos);
-        self.camera.update(dt, follow_pos);
+        if !self.exploring() {
+            let follow_pos = self.camera.follow.and_then(|id| self.universe.get(id)).map(|b| b.pos);
+            self.camera.update(dt, follow_pos);
+        }
 
         self.hovered = if scene_has_pointer { self.pick(cam, self.mouse) } else { None };
 
@@ -246,8 +284,7 @@ impl Game {
     }
 
     fn update_preview(&mut self, cam: &CameraFrame, scene_has_pointer: bool) {
-        self.preview.clear();
-        if self.tool != Tool::Spawn || !scene_has_pointer && self.spawn_anchor.is_none() {
+        if self.exploring() || self.tool != Tool::Spawn || !scene_has_pointer && self.spawn_anchor.is_none() {
             return;
         }
         let anchor = match self.spawn_anchor.or_else(|| self.plane_hit(cam, self.mouse)) {
@@ -385,9 +422,13 @@ impl Game {
         if (p - self.press_pos).length() > 4.0 && (self.left_down || self.right_down || self.middle_down) {
             self.dragged = true;
         }
-        let orbiting = self.right_down || (self.left_down && self.tool == Tool::Select && !self.shift)
-            || (self.left_down && self.tool == Tool::Terraform && !self.painting && !self.shift)
-            || (self.left_down && self.tool == Tool::Smash && !self.shift);
+        if self.exploring() {
+            if self.dragged && (self.left_down || self.right_down) {
+                self.mode_look(delta.x as f64, delta.y as f64);
+            }
+            return;
+        }
+        let orbiting = self.right_down || (self.left_down && !self.shift && self.tool != Tool::Spawn && !self.painting);
         let panning = self.middle_down || (self.left_down && self.shift && self.spawn_anchor.is_none());
         if panning {
             self.camera.pan(delta.x as f64, delta.y as f64);
@@ -403,6 +444,7 @@ impl Game {
                 self.press_pos = self.mouse;
                 self.dragged = false;
                 match self.tool {
+                    _ if self.exploring() => {}
                     Tool::Spawn if !self.shift => {
                         self.spawn_anchor = self.plane_hit(cam, self.mouse);
                         self.spawn_current = self.spawn_anchor;
@@ -454,6 +496,7 @@ impl Game {
         self.painting = false;
         self.spawn_anchor = None;
         self.spawn_current = None;
+        self.keys.clear();
     }
 
     pub fn track_spawn_drag(&mut self, cam: &CameraFrame) {
@@ -480,9 +523,29 @@ impl Game {
         let double = self.real_time - self.last_click < 0.35;
         self.last_click = self.real_time;
         match self.tool {
+            // While flying or walking, a click just picks a target to inspect.
+            _ if self.exploring() => {
+                if let Some(id) = hit {
+                    self.selected = Some(id);
+                }
+            }
             Tool::Smash => {
                 if let Some(id) = hit {
                     self.launch_at(id, None);
+                }
+            }
+            Tool::Fly | Tool::Walk => {
+                let Some(id) = hit else { return };
+                // The exact spot under the cursor, if the click landed on the globe itself.
+                let dir = self.universe.get(id).and_then(|b| {
+                    let ray = cam.ray(self.mouse);
+                    ray_sphere(cam.eye, ray, b.pos, b.radius).map(|t| cam.eye + ray * t - b.pos)
+                });
+                self.selected = Some(id);
+                if self.tool == Tool::Fly {
+                    self.start_flight(Some(id), dir);
+                } else {
+                    self.start_walk(id, dir);
                 }
             }
             _ => {
@@ -653,13 +716,28 @@ impl Game {
         }
     }
 
+    /// A key went down (not auto-repeat): remember it for steering, then run its action.
+    pub fn key_down(&mut self, key: &str) {
+        self.keys.insert(key.to_string());
+        self.key(key);
+    }
+
+    pub fn key_up(&mut self, key: &str) {
+        self.keys.remove(key);
+    }
+
     pub fn key(&mut self, key: &str) {
+        if self.mode_key(key) {
+            return;
+        }
         match key {
             "space" => self.paused = !self.paused,
             "1" => self.tool = Tool::Select,
             "2" => self.tool = Tool::Spawn,
             "3" => self.tool = Tool::Terraform,
             "4" => self.tool = Tool::Smash,
+            "5" => self.tool = Tool::Fly,
+            "6" => self.tool = Tool::Walk,
             "f" => {
                 if let Some(id) = self.selected {
                     self.focus(id);
@@ -691,7 +769,11 @@ impl Game {
     }
 
     pub fn scroll(&mut self, amount: f64) {
-        self.camera.zoom(amount);
+        if self.exploring() {
+            self.mode_scroll(amount);
+        } else {
+            self.camera.zoom(amount);
+        }
     }
 
 }

@@ -60,5 +60,15 @@ fn fs_main(in: SkyOut) -> @location(0) vec4<f32> {
     haze = haze + vec3<f32>(0.03, 0.02, 0.06) * smoothstep(0.55, 0.85, neb2) * 0.6;
     haze = haze + vec3<f32>(0.05, 0.025, 0.02) * smoothstep(0.62, 0.9, fbm(dir * 3.0 + vec3<f32>(30.0), 3)) * 0.4;
     col = col + haze * (0.35 + 0.65 * min(star_amount, 1.5));
+
+    // Inside an atmosphere the daytime sky hides the stars: brighter and paler
+    // towards the horizon, deeper overhead.
+    if (g.sky.a > 0.001) {
+        let h = dot(dir, g.sky_up.xyz);
+        let horizon = pow(1.0 - clamp(h, 0.0, 1.0), 4.0);
+        let lum = dot(g.sky.rgb, vec3<f32>(0.3, 0.5, 0.2));
+        let air = g.sky.rgb * (0.75 + 0.6 * horizon) + vec3<f32>(lum * 0.45 * horizon);
+        col = mix(col, air, g.sky.a);
+    }
     return vec4<f32>(col, 1.0);
 }

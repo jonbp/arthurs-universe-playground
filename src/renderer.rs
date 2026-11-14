@@ -18,8 +18,12 @@ pub const MAX_BODIES: usize = 1024;
 pub const MAX_RINGS: usize = 256;
 pub const MAX_PARTICLES: usize = 220_000;
 pub const MAX_LINE_VERTS: usize = 600_000;
+pub const MAX_SOLID_VERTS: usize = 30_000;
 const LAYER_BYTES: usize = PAINT_W * PAINT_H * 4;
 const UPLOADS_PER_FRAME: usize = 8;
+/// The camera is never inside a body, so the far half of every sphere is hidden:
+/// culling it halves the (expensive) planet shading where spheres overlap themselves.
+const PLANET_CULL: vk::CullModeFlags = vk::CullModeFlags::BACK;
 
 struct FrameRes {
     cmd: vk::CommandBuffer,
@@ -30,6 +34,7 @@ struct FrameRes {
     rings: Buffer,
     particles: Buffer,
     lines: Buffer,
+    solids: Buffer,
     staging: Buffer,
     scene_set: vk::DescriptorSet,
     comp_set: vk::DescriptorSet,
@@ -69,8 +74,10 @@ pub struct Renderer {
     ring_pipe: vk::Pipeline,
     particle_pipe: vk::Pipeline,
     line_pipe: vk::Pipeline,
+    solid_pipe: vk::Pipeline,
     comp_pipe: vk::Pipeline,
     desc_pool: vk::DescriptorPool,
+    sphere_ultra: Mesh,
     sphere_hi: Mesh,
     sphere_lo: Mesh,
     paint: Image,
@@ -113,6 +120,7 @@ struct PipeDesc<'a> {
     depth_test: bool,
     depth_write: bool,
     has_depth: bool,
+    cull: vk::CullModeFlags,
 }
 
 fn make_pipeline(device: &ash::Device, d: &PipeDesc) -> Result<vk::Pipeline> {
@@ -127,7 +135,7 @@ fn make_pipeline(device: &ash::Device, d: &PipeDesc) -> Result<vk::Pipeline> {
     let viewport = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
     let raster = vk::PipelineRasterizationStateCreateInfo::default()
         .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::NONE)
+        .cull_mode(d.cull)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
     let multisample = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
@@ -305,6 +313,7 @@ impl Renderer {
         let ring_mod = load_shader(&device, spv!("ring"))?;
         let particle_mod = load_shader(&device, spv!("particle"))?;
         let line_mod = load_shader(&device, spv!("line"))?;
+        let solid_mod = load_shader(&device, spv!("solid"))?;
         let comp_mod = load_shader(&device, spv!("composite"))?;
 
         let base = PipeDesc {
@@ -318,13 +327,16 @@ impl Renderer {
             depth_test: false,
             depth_write: false,
             has_depth: true,
+            cull: vk::CullModeFlags::NONE,
         };
-        let sky_pipe = make_pipeline(&device, &base)?;
+        // The sky is drawn after the opaque geometry and depth-tested against it (it sits at
+        // the far plane), so its starfield and nebula noise only run where sky is visible.
+        let sky_pipe = make_pipeline(&device, &PipeDesc { depth_test: true, ..base })?;
         let sphere_bind = [vk::VertexInputBindingDescription { binding: 0, stride: 12, input_rate: vk::VertexInputRate::VERTEX }];
         let sphere_attr = [vk::VertexInputAttributeDescription { location: 0, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 0 }];
         let planet_pipe = make_pipeline(
             &device,
-            &PipeDesc { module: planet_mod, bindings: &sphere_bind, attributes: &sphere_attr, depth_test: true, depth_write: true, ..base },
+            &PipeDesc { module: planet_mod, bindings: &sphere_bind, attributes: &sphere_attr, depth_test: true, depth_write: true, cull: PLANET_CULL, ..base },
         )?;
         let ring_pipe = make_pipeline(&device, &PipeDesc { module: ring_mod, blend: Blend::Premultiplied, depth_test: true, ..base })?;
         let particle_pipe = make_pipeline(&device, &PipeDesc { module: particle_mod, blend: Blend::Premultiplied, depth_test: true, ..base })?;
@@ -345,12 +357,17 @@ impl Renderer {
                 ..base
             },
         )?;
+        // Rockets: opaque lit triangles sharing the line vertex layout.
+        let solid_pipe = make_pipeline(
+            &device,
+            &PipeDesc { module: solid_mod, bindings: &line_bind, attributes: &line_attr, depth_test: true, depth_write: true, ..base },
+        )?;
         let comp_pipe = make_pipeline(
             &device,
             &PipeDesc { module: comp_mod, layout: comp_layout, pass: final_pass, has_depth: false, ..base },
         )?;
         unsafe {
-            for m in [sky_mod, planet_mod, ring_mod, particle_mod, line_mod, comp_mod] {
+            for m in [sky_mod, planet_mod, ring_mod, particle_mod, line_mod, solid_mod, comp_mod] {
                 device.destroy_shader_module(m, None);
             }
         }
@@ -364,6 +381,7 @@ impl Renderer {
             ib.write(&i);
             Ok(Mesh { vertices: vb, indices: ib, count: i.len() as u32 })
         };
+        let sphere_ultra = make_mesh(7)?;
         let sphere_hi = make_mesh(6)?;
         let sphere_lo = make_mesh(3)?;
 
@@ -463,6 +481,7 @@ impl Renderer {
             let rings = ctx.create_buffer((MAX_RINGS * std::mem::size_of::<GpuRing>()) as u64, vk::BufferUsageFlags::STORAGE_BUFFER)?;
             let particles = ctx.create_buffer((MAX_PARTICLES * std::mem::size_of::<GpuParticle>()) as u64, vk::BufferUsageFlags::STORAGE_BUFFER)?;
             let lines = ctx.create_buffer((MAX_LINE_VERTS * std::mem::size_of::<LineVertex>()) as u64, vk::BufferUsageFlags::VERTEX_BUFFER)?;
+            let solids = ctx.create_buffer((MAX_SOLID_VERTS * std::mem::size_of::<LineVertex>()) as u64, vk::BufferUsageFlags::VERTEX_BUFFER)?;
             let staging = ctx.create_buffer((LAYER_BYTES * UPLOADS_PER_FRAME) as u64, vk::BufferUsageFlags::TRANSFER_SRC)?;
             let layouts = [scene_set_layout, comp_set_layout];
             let sets = unsafe { device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(desc_pool).set_layouts(&layouts))? };
@@ -475,6 +494,7 @@ impl Renderer {
                 rings,
                 particles,
                 lines,
+                solids,
                 staging,
                 scene_set: sets[0],
                 comp_set: sets[1],
@@ -507,14 +527,16 @@ impl Renderer {
             comp_set_layout,
             scene_layout,
             comp_layout,
-            pipelines: vec![sky_pipe, planet_pipe, ring_pipe, particle_pipe, line_pipe, comp_pipe],
+            pipelines: vec![sky_pipe, planet_pipe, ring_pipe, particle_pipe, line_pipe, solid_pipe, comp_pipe],
             sky_pipe,
             planet_pipe,
             ring_pipe,
             particle_pipe,
             line_pipe,
+            solid_pipe,
             comp_pipe,
             desc_pool,
+            sphere_ultra,
             sphere_hi,
             sphere_lo,
             paint,
@@ -682,7 +704,9 @@ impl Renderer {
         let n_rings = f.rings.write(&frame.rings[..frame.rings.len().min(MAX_RINGS)]) as u32;
         let n_particles = f.particles.write(&frame.particles[..frame.particles.len().min(MAX_PARTICLES)]) as u32;
         let n_lines = f.lines.write(&frame.lines[..frame.lines.len().min(MAX_LINE_VERTS) & !1]) as u32;
-        let hi = frame.hi_count.min(n_bodies);
+        let n_solids = (f.solids.write(&frame.solids[..frame.solids.len().min(MAX_SOLID_VERTS)]) as u32 / 3) * 3;
+        let ultra = frame.ultra_count.min(n_bodies);
+        let hi = frame.hi_count.min(n_bodies - ultra);
 
         // Dirty paint layers -> staging.
         let mut uploads = Vec::new();
@@ -776,22 +800,26 @@ impl Renderer {
             device.cmd_set_scissor(cmd, 0, &[rect]);
             device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.scene_layout, 0, &[f.scene_set], &[]);
 
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.sky_pipe);
-            device.cmd_draw(cmd, 3, 1, 0, 0);
-
             if n_bodies > 0 {
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.planet_pipe);
-                if hi > 0 {
-                    device.cmd_bind_vertex_buffers(cmd, 0, &[self.sphere_hi.vertices.buffer], &[0]);
-                    device.cmd_bind_index_buffer(cmd, self.sphere_hi.indices.buffer, 0, vk::IndexType::UINT32);
-                    device.cmd_draw_indexed(cmd, self.sphere_hi.count, hi, 0, 0, 0);
-                }
-                if n_bodies > hi {
-                    device.cmd_bind_vertex_buffers(cmd, 0, &[self.sphere_lo.vertices.buffer], &[0]);
-                    device.cmd_bind_index_buffer(cmd, self.sphere_lo.indices.buffer, 0, vk::IndexType::UINT32);
-                    device.cmd_draw_indexed(cmd, self.sphere_lo.count, n_bodies - hi, 0, 0, hi);
+                // Instances are ordered ultra, hi, lo; each run uses a coarser sphere.
+                let mut first = 0;
+                for (mesh, count) in [(&self.sphere_ultra, ultra), (&self.sphere_hi, hi), (&self.sphere_lo, n_bodies - ultra - hi)] {
+                    if count > 0 {
+                        device.cmd_bind_vertex_buffers(cmd, 0, &[mesh.vertices.buffer], &[0]);
+                        device.cmd_bind_index_buffer(cmd, mesh.indices.buffer, 0, vk::IndexType::UINT32);
+                        device.cmd_draw_indexed(cmd, mesh.count, count, 0, 0, first);
+                    }
+                    first += count;
                 }
             }
+            if n_solids > 0 {
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.solid_pipe);
+                device.cmd_bind_vertex_buffers(cmd, 0, &[f.solids.buffer], &[0]);
+                device.cmd_draw(cmd, n_solids, 1, 0, 0);
+            }
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.sky_pipe);
+            device.cmd_draw(cmd, 3, 1, 0, 0);
             if n_rings > 0 {
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.ring_pipe);
                 device.cmd_draw(cmd, 6, n_rings, 0, 0);
@@ -973,14 +1001,14 @@ impl Drop for Renderer {
             for f in &self.frames {
                 d.destroy_fence(f.fence, None);
                 d.destroy_semaphore(f.image_available, None);
-                for b in [&f.globals, &f.bodies, &f.rings, &f.particles, &f.lines, &f.staging] {
+                for b in [&f.globals, &f.bodies, &f.rings, &f.particles, &f.lines, &f.solids, &f.staging] {
                     self.ctx.destroy_buffer(b);
                 }
             }
             for s in &self.render_finished {
                 d.destroy_semaphore(*s, None);
             }
-            for m in [&self.sphere_hi, &self.sphere_lo] {
+            for m in [&self.sphere_ultra, &self.sphere_hi, &self.sphere_lo] {
                 self.ctx.destroy_buffer(&m.vertices);
                 self.ctx.destroy_buffer(&m.indices);
             }

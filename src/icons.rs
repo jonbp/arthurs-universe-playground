@@ -79,10 +79,15 @@ pub enum Icon {
     Burst,
     Flyby,
     Warning,
+    // Exploring
+    Astronaut,
+    Thermometer,
+    Download,
+    Seat,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 65] = [
+    pub const ALL: [Icon; 69] = [
         Icon::Cursor,
         Icon::SpawnPlanet,
         Icon::Brush,
@@ -148,6 +153,10 @@ impl Icon {
         Icon::Burst,
         Icon::Flyby,
         Icon::Warning,
+        Icon::Astronaut,
+        Icon::Thermometer,
+        Icon::Download,
+        Icon::Seat,
     ];
 
     pub fn name(self) -> String {
@@ -762,6 +771,41 @@ fn draw(icon: Icon, p: &Pen) {
             p.closed(&[(12.0, 3.0), (22.0, 20.5), (2.0, 20.5)]);
             p.line(&[(12.0, 9.5), (12.0, 14.0)]);
             p.dot((12.0, 17.2), 1.2);
+        }
+        // ── Exploring ───────────────────────────────────────────
+        Astronaut => {
+            // Helmet with a visor, shoulders, and a walking pair of legs.
+            p.circle((12.0, 6.5), 4.3);
+            p.line(&[(9.8, 6.2), (14.2, 6.2)]);
+            p.line(&[(7.0, 16.0), (8.2, 12.6), (15.8, 12.6), (17.0, 16.0)]);
+            p.line(&[(10.5, 12.8), (10.0, 17.0), (7.5, 21.5)]);
+            p.line(&[(13.5, 12.8), (14.0, 17.0), (16.5, 21.5)]);
+        }
+        Thermometer => {
+            p.path(
+                &[
+                    vec![(9.8, 13.6), (9.8, 4.8)],
+                    p.ellipse_pts((12.0, 4.8), 2.2, 2.2, 0.0, 180.0, 360.0),
+                    vec![(14.2, 13.6)],
+                    p.ellipse_pts((12.0, 17.0), 4.0, 4.0, 0.0, -57.0, 237.0),
+                ],
+                true,
+            );
+            p.dot((12.0, 17.0), 1.9);
+            p.line(&[(12.0, 9.0), (12.0, 16.0)]);
+        }
+        Download => {
+            p.line(&[(12.0, 3.5), (12.0, 15.0)]);
+            p.line(&[(7.0, 10.5), (12.0, 15.5), (17.0, 10.5)]);
+            p.line(&[(4.0, 16.5), (4.0, 20.0), (20.0, 20.0), (20.0, 16.5)]);
+        }
+        Seat => {
+            // Cockpit window: a canopy arc over a dashboard with a joystick.
+            p.bezier((3.0, 15.0), (3.5, 2.5), (20.5, 2.5), (21.0, 15.0));
+            p.line(&[(2.5, 15.0), (21.5, 15.0)]);
+            p.line(&[(4.5, 20.5), (19.5, 20.5)]);
+            p.line(&[(12.0, 15.0), (12.0, 20.5)]);
+            p.line(&[(12.0, 3.5), (12.0, 6.5)]);
         }
     }
 }

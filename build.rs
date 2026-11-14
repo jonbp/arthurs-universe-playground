@@ -122,7 +122,7 @@ fn main() {
     let globals = fs::read_to_string(dir.join("globals.wgsl")).unwrap();
     let common = fs::read_to_string(dir.join("common.wgsl")).unwrap();
 
-    for scene in ["planet", "ring", "particle", "line", "sky"] {
+    for scene in ["planet", "ring", "particle", "line", "sky", "solid"] {
         let body = fs::read_to_string(dir.join(format!("{scene}.wgsl"))).unwrap();
         let src = format!("{globals}\n{common}\n{body}");
         compile(scene, &src, &out_dir);

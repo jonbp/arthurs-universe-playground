@@ -23,6 +23,8 @@ use crate::paint::Brush;
 use crate::presets::{CenterKind, Preset};
 use crate::universe::CollisionMode;
 
+mod hud;
+
 // ── Theme ───────────────────────────────────────────────────────────────────
 
 const ACCENT: Color32 = Color32::from_rgb(255, 190, 90);
@@ -424,6 +426,8 @@ fn tool_icon(t: Tool) -> Icon {
         Tool::Spawn => Icon::SpawnPlanet,
         Tool::Terraform => Icon::Brush,
         Tool::Smash => Icon::Comet,
+        Tool::Fly => Icon::Rocket,
+        Tool::Walk => Icon::Astronaut,
     }
 }
 
@@ -551,6 +555,7 @@ fn fmt_count(n: usize) -> String {
 pub fn draw(root: &mut Ui, game: &mut Game, cam: &CameraFrame, ppp: f32) {
     let ctx = root.ctx().clone();
     draw_labels(&ctx, game, cam, ppp);
+    hud::scene_overlay(&ctx, game, cam, ppp);
     if !game.show_ui {
         hidden_hint(&ctx, game);
         return;
@@ -561,11 +566,18 @@ pub fn draw(root: &mut Ui, game: &mut Game, cam: &CameraFrame, ppp: f32) {
     universe_bar(&ctx, game);
     time_bar(&ctx, game);
     view_bar(&ctx, game);
-    tool_dock(&ctx, game);
+    if game.exploring() {
+        // Flying or walking: the tools make way for that mode's own panel.
+        hud::flight_hud(&ctx, game);
+        hud::walk_hud(&ctx, game);
+    } else {
+        tool_dock(&ctx, game);
+        hint_bar(&ctx, game);
+    }
     inspector(&ctx, game);
     event_log(&ctx, game);
-    hint_bar(&ctx, game);
     stats_bar(&ctx, game);
+    hud::update_banner(&ctx, game);
     custom_modal(&ctx, game);
     help_modal(&ctx, game);
 }
@@ -885,6 +897,8 @@ fn tool_card(ctx: &egui::Context, game: &mut Game, open: &mut bool) {
                 Tool::Spawn => spawn_tool(ui, game),
                 Tool::Terraform => terraform_tool(ui, game),
                 Tool::Smash => smash_tool(ui, game),
+                Tool::Fly => hud::fly_tool(ui, game),
+                Tool::Walk => hud::walk_tool(ui, game),
             }
         });
     });
@@ -1043,6 +1057,8 @@ enum Action {
     Collapse,
     Delete,
     ResetPaint,
+    Fly,
+    Walk,
 }
 
 fn stat_cell(ui: &mut Ui, label: &str, value: &str, color: Color32, w: f32) {
@@ -1078,7 +1094,11 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
         (c.name.clone(), d, v, period)
     });
     let following = game.camera.follow == Some(id);
-    let max_h = (ctx.content_rect().height() - BELOW_BARS - 70.0).max(200.0);
+    // While flying or walking the mode's panel sits along the bottom: leave it room.
+    let exploring = game.exploring();
+    let max_h = (ctx.content_rect().height() - BELOW_BARS - if exploring { 230.0 } else { 70.0 }).max(200.0);
+    let conditions = crate::conditions::conditions(&game.universe, &game.universe.bodies[idx]);
+    let solid = crate::terrain::has_solid_surface(game.universe.bodies[idx].kind);
 
     floating(ctx, "inspector", Align2::RIGHT_TOP, vec2(-EDGE, BELOW_BARS), glass(14), |ui| {
         ui.set_width(INSPECTOR_W);
@@ -1180,6 +1200,16 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
                 (Icon::CircleOrbit, "Circularise".into(), "Make its orbit circular", Action::Circularize, None, false),
                 (Icon::Comet, "Barrage".into(), "Hurl 12 asteroids at it  (B)", Action::Barrage, None, false),
             ];
+            if exploring {
+                // The camera belongs to the rocket / astronaut for now.
+                items.remove(0);
+            } else {
+                let (label, hint) = if solid { ("Fly from here", "Launch the selected rocket from its surface") } else { ("Fly in orbit", "Start the selected rocket in orbit around it") };
+                items.push((Icon::Rocket, label.into(), hint, Action::Fly, Some(INFO), false));
+                if solid {
+                    items.push((Icon::Astronaut, "Walk here".into(), "Stand on its surface and look around", Action::Walk, Some(INFO), false));
+                }
+            }
             if b.kind == BodyKind::Star {
                 match b.supernova_timer {
                     Some(t) => items.push((Icon::Warning, format!("Boom in {t:.1}s"), "It's going to blow!", Action::Supernova, Some(DANGER), true)),
@@ -1200,6 +1230,8 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
                     action = Some(*act);
                 }
             });
+
+            hud::conditions_section(ui, &conditions);
 
             // Physical properties.
             section(ui, "Physical");
@@ -1295,6 +1327,10 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
         }
         Some(Action::Collapse) => game.collapse_to_black_hole(id),
         Some(Action::Delete) => game.delete(id),
+        Some(Action::Fly) => game.start_flight(Some(id), None),
+        Some(Action::Walk) => {
+            game.start_walk(id, None);
+        }
         Some(Action::ResetPaint) => {
             if let Some(i) = game.universe.index_of(id) {
                 if let Some(l) = game.universe.bodies[i].paint_layer.take() {
@@ -1332,6 +1368,9 @@ fn event_log(ctx: &egui::Context, game: &Game) {
     if log.is_empty() {
         return;
     }
+    // While exploring, the bottom edge belongs to the flight / walking panel:
+    // the log moves up to where the tool dock normally is.
+    let (anchor, offset) = if game.exploring() { (Align2::LEFT_TOP, vec2(EDGE, BELOW_BARS)) } else { (Align2::LEFT_BOTTOM, vec2(EDGE, -EDGE)) };
     let open_id = Id::new("event_log_open");
     let mut open = ctx.data_mut(|d| *d.get_temp_mut_or(open_id, true));
     let mono = FontId::monospace(11.5);
@@ -1340,7 +1379,7 @@ fn event_log(ctx: &egui::Context, game: &Game) {
     if !open {
         // Collapsed: icon, newest message, expand chevron. The whole pill is the button.
         let frame = glass(0).corner_radius(12).inner_margin(Margin::symmetric(10, 6));
-        let clicked = floating(ctx, "event_log", Align2::LEFT_BOTTOM, vec2(EDGE, -EDGE), frame, |ui| {
+        let clicked = floating(ctx, "event_log", anchor, offset, frame, |ui| {
             let resp = ui
                 .horizontal(|ui| {
                     ui.set_max_width(LOG_W - 20.0);
@@ -1359,7 +1398,7 @@ fn event_log(ctx: &egui::Context, game: &Game) {
         }
     } else {
         let frame = glass(0).corner_radius(14).inner_margin(Margin { left: 10, right: 6, top: 6, bottom: 10 });
-        floating(ctx, "event_log", Align2::LEFT_BOTTOM, vec2(EDGE, -EDGE), frame, |ui| {
+        floating(ctx, "event_log", anchor, offset, frame, |ui| {
             ui.set_width(LOG_W);
             // Areas reuse last frame's size as max_rect; lift it so the console can reach full height.
             ui.set_max_height(400.0);
@@ -1453,6 +1492,10 @@ fn hint_bar(ctx: &egui::Context, game: &mut Game) {
 }
 
 fn stats_bar(ctx: &egui::Context, game: &Game) {
+    // Not enough room beside the flight / walking panel on narrow windows.
+    if game.exploring() && ctx.content_rect().width() < 1150.0 {
+        return;
+    }
     egui::Area::new(Id::new("stats_bar")).anchor(Align2::RIGHT_BOTTOM, vec2(-EDGE, -EDGE)).interactable(false).show(ctx, |ui| {
         glass(4).corner_radius(14).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1558,11 +1601,20 @@ fn help_modal(ctx: &egui::Context, game: &mut Game) {
             (&["Double-click", "F"], "Follow a body"),
         ]);
         section(ui, "Tools");
-        tile_grid(ui, &Tool::ALL, 4, 58.0, |ui, t, size| {
+        tile_grid(ui, &Tool::ALL, 6, 58.0, |ui, t, size| {
             tile(ui, tool_icon(t), t.label(), false, size, Some(ACCENT)).on_hover_text(t.hint());
         });
         ui.add_space(2.0);
-        rows(ui, "help_tools", &[(&["1", "2", "3", "4"], "Select · Spawn · Terraform · Smash")]);
+        rows(ui, "help_tools", &[(&["1", "2", "3", "4", "5", "6"], "Pick a tool")]);
+        section(ui, "Flying and walking");
+        rows(ui, "help_explore", &[
+            (&["W", "A", "S", "D"], "Steer the rocket / walk"),
+            (&["Shift", "Ctrl"], "Throttle up / down (Z full, X off)"),
+            (&["V"], "Cockpit or outside view"),
+            (&["R"], "Brake assist for landing"),
+            (&["G"], "Get out and walk / climb back in"),
+            (&["Space"], "Jump (on foot)"),
+        ]);
         section(ui, "Keys");
         rows(ui, "help_keys", &[
             (&["Space"], "Pause / play"),
@@ -1580,6 +1632,7 @@ fn help_modal(ctx: &egui::Context, game: &mut Game) {
             "Make the Sun go supernova",
             "Paint new continents on Earth, then hit it with an asteroid",
             "Load Galaxy Collision and set the speed to 50×",
+            "Fly to the Moon, land, and see how high you can jump",
         ] {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
@@ -1587,6 +1640,7 @@ fn help_modal(ctx: &egui::Context, game: &mut Game) {
                 ui.label(RichText::new(idea).size(12.5).color(Color32::from_rgb(204, 208, 222)));
             });
         }
+        hud::version_footer(ui, game);
     });
     if close || resp.should_close() {
         game.show_help = false;
@@ -1607,7 +1661,12 @@ fn draw_labels(ctx: &egui::Context, game: &Game, cam: &CameraFrame, ppp: f32) {
         kb.partial_cmp(&ka).unwrap_or(std::cmp::Ordering::Equal)
     });
     let mut placed: Vec<Rect> = Vec::new();
+    let sandbox = !game.exploring();
     for b in order {
+        // Standing on it or skimming it: its name and ring would just float in the ground.
+        if !sandbox && (cam.eye - b.pos).length() < b.radius * 1.5 {
+            continue;
+        }
         let Some(sp) = cam.project(b.pos) else { continue };
         let r_px = cam.screen_radius(b.pos, b.radius);
         let p = to_pt(sp);
@@ -1627,7 +1686,7 @@ fn draw_labels(ctx: &egui::Context, game: &Game, cam: &CameraFrame, ppp: f32) {
             painter.circle_stroke(p, 3.0, Stroke::new(1.0, white(70)));
         }
         let is_moon = b.mass < 1.0 && !selected && !hovered;
-        if is_moon && r < 3.0 && game.camera.distance > 80.0 {
+        if is_moon && r < 3.0 && sandbox && game.camera.distance > 80.0 {
             continue;
         }
         let at = egui::pos2(p.x, p.y + r + 6.0);

@@ -18,6 +18,10 @@ pub struct Globals {
     pub light_pos: [[f32; 4]; MAX_LIGHTS],
     pub light_col: [[f32; 4]; MAX_LIGHTS],
     pub black_holes: [[f32; 4]; MAX_BLACK_HOLES],
+    /// rgb = atmosphere colour seen from the camera, a = how much it hides the stars.
+    pub sky: [f32; 4],
+    /// xyz = "up" where the camera is, w = sunlight reaching solid models (0..1).
+    pub sky_up: [f32; 4],
 }
 
 #[repr(C)]
@@ -59,13 +63,19 @@ pub struct LineVertex {
 /// Everything the renderer needs for one frame.
 pub struct FrameData {
     pub globals: Globals,
-    /// Bodies drawn with the high-detail sphere come first.
+    /// Bodies in drawing order: close-up ("ultra") spheres, then high-detail, then low-detail.
     pub bodies: Vec<GpuBody>,
+    /// How many bodies at the start of `bodies` fill the view and get the finest sphere.
+    pub ultra_count: u32,
+    /// How many after those get the high-detail sphere.
     pub hi_count: u32,
     pub rings: Vec<GpuRing>,
     pub particles: Vec<GpuParticle>,
     pub lines: Vec<LineVertex>,
-    /// Scratch list of low-detail bodies, appended to `bodies` once the frame is built.
+    /// Opaque lit triangles (rockets). Same vertex layout as lines; colour alpha = glow.
+    pub solids: Vec<LineVertex>,
+    /// Scratch lists, appended to `bodies` once the frame is built.
+    pub bodies_hi: Vec<GpuBody>,
     pub bodies_lo: Vec<GpuBody>,
 }
 
@@ -76,10 +86,13 @@ impl FrameData {
         FrameData {
             globals: Globals::zeroed(),
             bodies: Vec::new(),
+            ultra_count: 0,
             hi_count: 0,
             rings: Vec::new(),
             particles: Vec::new(),
             lines: Vec::new(),
+            solids: Vec::new(),
+            bodies_hi: Vec::new(),
             bodies_lo: Vec::new(),
         }
     }

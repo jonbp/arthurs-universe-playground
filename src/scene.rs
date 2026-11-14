@@ -4,6 +4,7 @@ use glam::{DVec3, Vec3, Vec4};
 
 use crate::body::BodyKind;
 use crate::camera::CameraFrame;
+use crate::explore::SceneExtras;
 use crate::gpu_types::*;
 use crate::universe::{Universe, P_GLOW, P_HOT, P_IMMORTAL};
 
@@ -27,10 +28,13 @@ pub struct Polyline {
 }
 
 /// Fill `frame` (reusing its allocations) with everything needed to draw the universe.
-pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts: &SceneOptions, overlays: &[Polyline]) {
-    let FrameData { bodies: bodies_hi, bodies_lo, rings, particles, lines, .. } = frame;
+pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts: &SceneOptions, overlays: &[Polyline], extras: &SceneExtras) {
+    let FrameData { bodies: bodies_ultra, bodies_hi, bodies_lo, rings, particles, lines, solids, .. } = frame;
+    bodies_ultra.clear();
     bodies_hi.clear();
     bodies_lo.clear();
+    solids.clear();
+    solids.extend_from_slice(&extras.solids);
     rings.clear();
     particles.clear();
     particles.reserve(u.particles.len() + 64);
@@ -73,7 +77,10 @@ pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts:
             atmo: [s.atmosphere.x, s.atmosphere.y, s.atmosphere.z, s.atmo_strength],
             extra: [b.emissive(), b.flash.min(3.0) * if b.kind.is_luminous() { 0.0 } else { 1.0 }, highlight, 0.0],
         };
-        if px > 50.0 {
+        // A world that more than fills the view (flying low, walking) gets the finest mesh.
+        if px > cam.size.y * 1.5 && bodies_ultra.len() < 2 {
+            bodies_ultra.push(g);
+        } else if px > 50.0 {
             bodies_hi.push(g);
         } else {
             bodies_lo.push(g);
@@ -144,8 +151,10 @@ pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts:
             lines.push(LineVertex { pos: [rel.x, rel.y, rel.z, 1.0], color: [c.x, c.y, c.z, alpha_scale] });
         }
     }
+    let ultra_count = bodies_ultra.len() as u32;
     let hi_count = bodies_hi.len() as u32;
-    bodies_hi.append(bodies_lo);
+    bodies_ultra.append(bodies_hi);
+    bodies_ultra.append(bodies_lo);
 
     // ---- overlays ----
     for pl in overlays {
@@ -177,6 +186,7 @@ pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts:
         let shape = if p.flags & P_GLOW != 0 { 1.0 } else { 0.0 };
         particles.push(GpuParticle { pos_size: [rel.x, rel.y, rel.z, p.size], color: [c.x, c.y, c.z, shape] });
     }
+    particles.extend_from_slice(&extras.glows);
     for f in &u.flashes {
         let rel = cam.rel(f.pos);
         // Glow brightness grows sub-linearly so huge flashes don't white out the screen.
@@ -197,6 +207,8 @@ pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts:
         light_pos: [[0.0; 4]; MAX_LIGHTS],
         light_col: [[0.0; 4]; MAX_LIGHTS],
         black_holes: [[0.0; 4]; MAX_BLACK_HOLES],
+        sky: extras.sky,
+        sky_up: extras.sky_up,
     };
     for (i, (p, r, c)) in lights.iter().enumerate() {
         globals.light_pos[i] = [p.x, p.y, p.z, *r];
@@ -210,5 +222,6 @@ pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts:
     }
 
     frame.globals = globals;
+    frame.ultra_count = ultra_count;
     frame.hi_count = hi_count;
 }

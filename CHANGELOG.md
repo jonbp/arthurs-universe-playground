@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-14
+
+### Added
+
+- **Fly a rocket.** A new Fly tool (`5`) with a hangar of six rockets: Sparrow, Moonhopper, Goliath, Star Shuttle, Ion Glider and Warp Arrow, each with its own engine power, fuel, steering and landing legs. Launch from any solid world, or start in orbit around a star or gas giant. The rocket feels the gravity of every body, shows its predicted path, lands if you touch down gently and is wrecked if you don't. Switch between an outside view and a cockpit with an attitude ball (`V`).
+- **Walk on worlds.** A new Walk tool (`6`): click a rocky planet, moon or asteroid to stand on that spot, walk over its real terrain (including anything you have painted), and jump, higher where gravity is weaker. Land a rocket, press `G` to climb out, and `G` again to climb back in. Inside an atmosphere the daytime sky hides the stars and turns orange at sunset.
+- **Conditions on every world.** The inspector shows temperature (with the day/night swing on airless worlds), gravity, air pressure and what the air is made of, sunlight, day length, escape speed, the state of water, and a verdict on whether people could live there. On foot you get the temperature where you are standing.
+- **Update check.** On startup the game asks GitHub whether a newer release exists and, if so, shows a banner with a Download button for your platform. The help window shows the current version and a "Check for updates" button. Start with `--no-update-check` (or set `AUP_NO_UPDATE_CHECK`) to switch it off.
+
+### Changed
+
+- Planet terrain uses an integer-hashed noise that gives identical results on the GPU and the CPU, so rockets and astronauts stand exactly on the ground that is drawn. Continents, craters and cloud patterns have the same character but different shapes than in 1.1.0.
+- Worlds that fill the view are drawn with a finer sphere and close-up ground detail.
+- Faster planet rendering: the hidden far side of each sphere is no longer shaded, the terrain noise is evaluated once per pixel instead of twice, and the starfield is only computed where sky is actually visible.
+
+### Fixed
+
+- Debug builds (`cargo run` without `--release`) no longer abort on the first frame with "Dropped TexturesDelta".
+
 ## [1.1.0] - 2026-11-14
 
 ### Fixed
@@ -41,6 +60,7 @@ First public release.
 - Ten presets, including Theia Impact, Black Hole Feast, Supernova Countdown and Galaxy Collision.
 - Downloadable builds for Windows (x64), macOS (Apple Silicon, MoltenVK bundled) and Linux (x86_64), all with the app icon.
 
-[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jonbp/arthurs-universe-playground/releases/tag/v1.0.0

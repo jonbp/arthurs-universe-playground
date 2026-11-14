@@ -60,18 +60,14 @@ fn base_height(kind: i32, p: vec3<f32>, seed: f32) -> f32 {
     }
 }
 
-// Elevation used both for displacement and land/sea decisions
-fn elevation(kind: i32, p: vec3<f32>, b: GpuBody, pt: vec4<f32>) -> f32 {
-    return base_height(kind, p, b.col_b.w) + (pt.r - 0.5) * 2.0;
-}
-
-// Relative radial displacement
-fn displacement(kind: i32, p: vec3<f32>, b: GpuBody, pt: vec4<f32>) -> f32 {
+// Relative radial displacement. `base` is base_height() for this point: it is the
+// expensive part, so callers evaluate it once and share it with the elevation.
+fn displacement(kind: i32, base: f32, b: GpuBody, pt: vec4<f32>) -> f32 {
     if (kind == K_STAR || kind == K_NEUTRON || kind == K_BLACKHOLE) {
         return 0.0;
     }
     let paint_h = (pt.r - 0.5) * 2.0;
-    var e = base_height(kind, p, b.col_b.w);
+    var e = base;
     if (kind == K_EARTH) {
         e = max(e + paint_h, b.params.y);
         return e * b.params.x;
@@ -85,7 +81,7 @@ fn vs_main(@location(0) pos: vec3<f32>, @builtin(instance_index) inst: u32) -> V
     let kind = body_kind(b);
     let p = normalize(pos);
     let pt = paint_sample(p, b.col_c.w);
-    let r = b.pos_radius.w * (1.0 + displacement(kind, p, b, pt));
+    let r = b.pos_radius.w * (1.0 + displacement(kind, base_height(kind, p, b.col_b.w), b, pt));
     let world = b.pos_radius.xyz + quat_rotate(b.rot, p * r);
     var out: VsOut;
     out.clip = g.view_proj * vec4<f32>(world, 1.0);
@@ -138,8 +134,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let radius = b.pos_radius.w;
     let time = g.screen.z;
     let pt = paint_sample(p, b.col_c.w);
-    let elev = elevation(kind, p, b, pt);
-    let disp = displacement(kind, p, b, pt);
+    // Elevation (land/sea decisions) and displacement (bump shading) share one noise evaluation.
+    let base = base_height(kind, p, seed);
+    let elev = base + (pt.r - 0.5) * 2.0;
+    let disp = displacement(kind, base, b, pt);
+    // How high the camera is above this world, in radii: clouds painted on the
+    // surface thin out as you come down, so you look through them, not at them.
+    let cam_alt = (length(b.pos_radius.xyz) - radius) / radius;
+    let cloud_fade = smoothstep(0.03, 0.35, cam_alt);
 
     // Bump normal in object space, then to world.
     let bump_scale = select(1.0, 0.0, kind == K_EARTH && elev < b.params.y);
@@ -186,7 +188,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             }
             let lat = abs(p.y) + (fbm(sp * 6.0, 3) - 0.5) * 0.15;
             s.albedo = mix(s.albedo, vec3<f32>(0.92, 0.95, 1.0), smoothstep(0.8, 0.86, lat));
-            clouds = smoothstep(0.48, 0.72, fbm(sp * 3.2 + vec3<f32>(time * 0.012, 0.0, time * 0.006), 5)) * b.params.z;
+            if (cloud_fade > 0.0) {
+                clouds = smoothstep(0.48, 0.72, fbm(sp * 3.2 + vec3<f32>(time * 0.012, 0.0, time * 0.006), 5)) * b.params.z * cloud_fade;
+            }
         }
         case 3: { // desert
             let dark = smoothstep(0.45, 0.65, fbm(sp * 2.2, 4));
@@ -237,6 +241,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         default: {}
     }
 
+    // Standing on (or skimming) a world: add fine grain so the ground isn't a smooth blur.
+    // Only the ground close to the camera can show it, so only that pays for it.
+    let frag_dist = length(in.world) / radius;
+    if (frag_dist < 0.3 && kind != K_STAR && kind != K_NEUTRON && kind != K_GAS && kind != K_ICEGIANT) {
+        let near = 1.0 - smoothstep(0.03, 0.3, frag_dist);
+        let grain = fbm(sp * 320.0, 3);
+        s.albedo = s.albedo * mix(1.0, 0.55 + 0.9 * grain, near);
+    }
+
     // ---- painted materials ----
     let mat = i32(floor(pt.g * 255.0 / 32.0));
     let ms = clamp(pt.b * 1.2, 0.0, 1.0);
@@ -279,9 +292,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         day = day + clamp(dot(geo, l) + 0.35, 0.0, 1.0) * length(lc);
     }
 
-    // atmosphere rim
+    // Atmosphere. From space it is a glowing rim around the limb. Down on the
+    // surface every bit of ground is seen edge-on, so the rim would wash it all
+    // out: there it becomes haze that thickens with distance instead.
+    let low = 1.0 - smoothstep(0.05, 0.6, cam_alt);
     let rim = pow(1.0 - ndv, 3.5);
-    color = color + b.atmo.rgb * b.atmo.w * rim * min(day, 3.0);
+    color = color + b.atmo.rgb * b.atmo.w * rim * min(day, 3.0) * (1.0 - low);
+    let haze = low * clamp(b.atmo.w, 0.0, 1.0) * (1.0 - exp(-length(in.world) / (radius * 0.8)));
+    color = mix(color, b.atmo.rgb * min(day, 1.5) * 0.6, haze * 0.7);
 
     // night-side city lights hint for earthlike? keep subtle: skip
 

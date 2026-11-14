@@ -5,6 +5,8 @@
 
 mod body;
 mod camera;
+mod conditions;
+mod explore;
 mod game;
 mod gpu_types;
 mod icons;
@@ -12,9 +14,12 @@ mod mesh;
 mod paint;
 mod presets;
 mod renderer;
+mod rocket;
 mod scene;
+mod terrain;
 mod ui;
 mod universe;
+mod update;
 mod util;
 mod vkctx;
 
@@ -52,6 +57,16 @@ struct Options {
     zoom: Option<f64>,
     /// Synthetic UI clicks for automated testing: (x, y) in points, at frame n.
     clicks: Vec<(f32, f32, u32)>,
+    /// Start flying from / walking on this body.
+    fly: Option<String>,
+    walk: Option<String>,
+    rocket: Option<usize>,
+    cockpit: bool,
+    /// Hold these keys down from the first frame (comma separated), e.g. "z" for full throttle.
+    hold: Vec<String>,
+    no_update_check: bool,
+    /// Pretend to be this version when checking for updates (to test the banner).
+    assume_version: Option<String>,
 }
 
 fn parse_args() -> Options {
@@ -71,6 +86,21 @@ fn parse_args() -> Options {
             "--paint" => o.paint = next,
             "--blackhole" => o.blackhole = next,
             "--zoom" => o.zoom = next.and_then(|s| s.parse().ok()),
+            "--fly" => o.fly = next,
+            "--walk" => o.walk = next,
+            "--rocket" => o.rocket = next.and_then(|s| s.parse().ok()),
+            "--hold" => o.hold = next.map(|s| s.split(',').map(|k| k.trim().to_lowercase()).collect()).unwrap_or_default(),
+            "--assume-version" => o.assume_version = next,
+            "--cockpit" => {
+                o.cockpit = true;
+                i += 1;
+                continue;
+            }
+            "--no-update-check" => {
+                o.no_update_check = true;
+                i += 1;
+                continue;
+            }
             "--click" => {
                 // X,Y@FRAME (points), e.g. --click 1834,54@10
                 let parsed = next.as_deref().and_then(|v| {
@@ -95,7 +125,7 @@ fn parse_args() -> Options {
             }
             "--help" | "-h" => {
                 println!(
-                    "Arthur's Universe Playground\n\nDeveloper options:\n  --preset <solar|rogue|theia|headon|binary|blackhole|supernova|galaxy|disk|empty>\n  --focus <body name>   --zoom <distance>   --speed <x>\n  --supernova <star>   --smash <body>   --paint <body>   --blackhole <body>\n  --screenshot <file.bmp> --frames <n>   --hide-ui   --icons (show the icon set)\n  --click <x,y@frame>   inject a UI click (repeatable)"
+                    "Arthur's Universe Playground\n\nDeveloper options:\n  --preset <solar|rogue|theia|headon|binary|blackhole|supernova|galaxy|disk|empty>\n  --focus <body name>   --zoom <distance>   --speed <x>\n  --supernova <star>   --smash <body>   --paint <body>   --blackhole <body>\n  --screenshot <file.bmp> --frames <n>   --hide-ui   --icons (show the icon set)\n  --click <x,y@frame>   inject a UI click (repeatable)\n  --fly <body>   --walk <body>   --rocket <0-5>   --cockpit   --hold <key,key>\n  --no-update-check   --assume-version <x.y.z>"
                 );
                 std::process::exit(0);
             }
@@ -133,6 +163,7 @@ struct State {
     egui_state: egui_winit::State,
     game: Game,
     frame_data: gpu_types::FrameData,
+    extras: explore::SceneExtras,
     last: Instant,
     frame_count: u32,
     fps_timer: f64,
@@ -244,6 +275,25 @@ impl State {
                 game.launch_at(id, None);
             }
         }
+        if let Some(r) = opts.rocket {
+            game.rocket = r.min(rocket::ROCKETS.len() - 1);
+        }
+        if let Some(n) = &opts.fly {
+            game.start_flight(find(&game, n), None);
+            if let (true, explore::Mode::Flight(f)) = (opts.cockpit, &mut game.mode) {
+                f.view = explore::FlightView::Cockpit;
+            }
+        }
+        if let Some(id) = opts.walk.as_ref().and_then(|n| find(&game, n)) {
+            game.start_walk(id, None);
+        }
+        for k in &opts.hold {
+            game.key_down(k);
+        }
+        // One quiet request to GitHub, skipped for automated runs.
+        if !opts.no_update_check && (opts.screenshot.is_none() || opts.assume_version.is_some()) && std::env::var_os("AUP_NO_UPDATE_CHECK").is_none() {
+            game.updater = update::Updater::start(opts.assume_version.as_deref().unwrap_or(env!("CARGO_PKG_VERSION")));
+        }
         Ok(State {
             window,
             renderer,
@@ -251,6 +301,7 @@ impl State {
             egui_state,
             game,
             frame_data: gpu_types::FrameData::new(),
+            extras: explore::SceneExtras::default(),
             last: Instant::now(),
             frame_count: 0,
             fps_timer: 0.0,
@@ -283,7 +334,7 @@ impl State {
         }
         let extent = self.renderer.extent();
         let (w, h) = (extent.width as f32, extent.height as f32);
-        let cam = self.game.camera.frame(w, h);
+        let cam = self.game.view_frame(w, h);
 
         let mut raw = self.egui_state.take_egui_input(&self.window);
         for &(x, y, f) in &self.opts.clicks {
@@ -309,7 +360,8 @@ impl State {
         self.game.track_spawn_drag(&cam);
         self.game.update(dt, &cam, scene_has_pointer);
 
-        let cam = self.game.camera.frame(w, h);
+        let cam = self.game.view_frame(w, h);
+        self.game.scene_extras(&cam, &mut self.extras);
         let opts = SceneOptions {
             trails: self.game.show_trails,
             exposure: self.game.exposure,
@@ -320,7 +372,7 @@ impl State {
             hovered: self.game.hovered,
             time: self.game.real_time as f32,
         };
-        scene::build_frame(&mut self.frame_data, &self.game.universe, &cam, &opts, &self.game.preview);
+        scene::build_frame(&mut self.frame_data, &self.game.universe, &cam, &opts, &self.game.preview, &self.extras);
         let prims = self.egui_ctx.tessellate(output.shapes, output.pixels_per_point);
 
         self.frame_count += 1;
@@ -328,7 +380,12 @@ impl State {
         if want_shot {
             self.renderer.capture = true;
         }
-        let ok = self.renderer.render(&self.frame_data, &mut self.game.universe.paint, &prims, &output.textures_delta, output.pixels_per_point)?;
+        let rendered = self.renderer.render(&self.frame_data, &mut self.game.universe.paint, &prims, &output.textures_delta, output.pixels_per_point);
+        // The renderer has applied (or deliberately skipped) the texture changes; egui's
+        // debug builds assert that a delta is never dropped without being acknowledged.
+        let mut textures_delta = output.textures_delta;
+        textures_delta.clear();
+        let ok = rendered?;
         if !ok {
             self.renderer.needs_resize = true;
         }
@@ -409,7 +466,7 @@ impl ApplicationHandler for App {
         let egui_wants_pointer = st.egui_ctx.egui_wants_pointer_input() || st.egui_ctx.is_pointer_over_egui();
         let cam = {
             let e = st.renderer.extent();
-            st.game.camera.frame(e.width as f32, e.height as f32)
+            st.game.view_frame(e.width as f32, e.height as f32)
         };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -452,19 +509,31 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(false) => st.game.focus_lost(),
             WindowEvent::ModifiersChanged(m) => st.game.set_shift(m.state().shift_key()),
             WindowEvent::KeyboardInput { event, .. } => {
-                // Ignore auto-repeat: holding Space or B must not toggle pause / fire barrages 30x a second.
-                if resp.consumed || st.egui_ctx.egui_wants_keyboard_input() || event.state != ElementState::Pressed || event.repeat {
-                    return;
-                }
                 let key = match &event.logical_key {
                     Key::Named(NamedKey::Space) => "space".to_string(),
                     Key::Named(NamedKey::Delete) => "delete".to_string(),
                     Key::Named(NamedKey::Backspace) => "backspace".to_string(),
                     Key::Named(NamedKey::Escape) => "escape".to_string(),
+                    Key::Named(NamedKey::Enter) => "enter".to_string(),
+                    Key::Named(NamedKey::ArrowUp) => "up".to_string(),
+                    Key::Named(NamedKey::ArrowDown) => "down".to_string(),
+                    Key::Named(NamedKey::ArrowLeft) => "left".to_string(),
+                    Key::Named(NamedKey::ArrowRight) => "right".to_string(),
+                    Key::Named(NamedKey::Shift) => "shift".to_string(),
+                    Key::Named(NamedKey::Control) => "ctrl".to_string(),
                     Key::Character(c) => c.to_lowercase(),
                     _ => return,
                 };
-                st.game.key(&key);
+                // Releases always get through, so a steering key can't stick while the UI has focus.
+                if event.state != ElementState::Pressed {
+                    st.game.key_up(&key);
+                    return;
+                }
+                // Ignore auto-repeat: holding Space or B must not toggle pause / fire barrages 30x a second.
+                if resp.consumed || st.egui_ctx.egui_wants_keyboard_input() || event.repeat {
+                    return;
+                }
+                st.game.key_down(&key);
             }
             _ => {}
         }

@@ -45,6 +45,36 @@ pub struct Shockwave {
     pub hit: Vec<u64>,
 }
 
+/// The player's rocket: a massless craft pulled by every body and pushed by its engine.
+/// It is integrated inside the physics step so it stays in sync at any time scale.
+#[derive(Clone, Debug)]
+pub struct Ship {
+    pub pos: DVec3,
+    pub vel: DVec3,
+    pub acc: DVec3,
+    /// Engine acceleration (already scaled by throttle), world space.
+    pub thrust: DVec3,
+    /// Distance from the ship's centre to its feet.
+    pub radius: f64,
+    /// Set when the ship touches a body; it then stops moving until the game reacts.
+    pub hit: Option<ShipHit>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ShipHit {
+    pub body: u64,
+    /// Speed relative to the (spinning) ground at the moment of contact.
+    pub speed: f64,
+    /// Unit vector from the body's centre to the contact point.
+    pub normal: DVec3,
+}
+
+impl Ship {
+    pub fn new(pos: DVec3, vel: DVec3, radius: f64) -> Ship {
+        Ship { pos, vel, acc: DVec3::ZERO, thrust: DVec3::ZERO, radius, hit: None }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CollisionMode {
     Realistic,
@@ -103,6 +133,8 @@ pub struct Universe {
     pub paint: PaintStore,
     pub rng: Rng,
     pub log: Vec<String>,
+    /// The rocket being flown, if any (see `explore.rs`).
+    pub ship: Option<Ship>,
     next_id: u64,
     contacts: Vec<Contact>,
     scratch_probes: Vec<Probe>,
@@ -129,6 +161,7 @@ impl Universe {
             paint: PaintStore::new(),
             rng: Rng::new(seed),
             log: Vec::new(),
+            ship: None,
             next_id: 1,
             contacts: Vec::new(),
             scratch_probes: Vec::new(),
@@ -145,6 +178,7 @@ impl Universe {
         self.shockwaves.clear();
         self.time = 0.0;
         self.log.clear();
+        self.ship = None;
         self.contacts.clear();
         self.paint.reset_all();
     }
@@ -193,6 +227,27 @@ impl Universe {
             let a = b.mass / d2;
             if a > best_a {
                 best_a = a;
+                best = Some(i);
+            }
+        }
+        best
+    }
+
+    /// The body whose neighbourhood `pos` is in: the one with the strongest tidal grip
+    /// (mass / distance³), which matches the Hill sphere. Unlike the raw pull used by
+    /// [`dominant_attractor`](Self::dominant_attractor), this picks Earth, not the Sun,
+    /// for a rocket a few planet-radii above Earth.
+    pub fn reference_body(&self, pos: DVec3) -> Option<usize> {
+        let mut best = None;
+        let mut best_grip = 0.0;
+        for (i, b) in self.bodies.iter().enumerate() {
+            if !b.alive {
+                continue;
+            }
+            let d = (b.pos - pos).length().max(1e-3);
+            let grip = b.mass / (d * d * d);
+            if grip > best_grip {
+                best_grip = grip;
                 best = Some(i);
             }
         }
@@ -265,7 +320,12 @@ impl Universe {
             b.vel += b.acc * (0.5 * dt);
             b.pos += b.vel * dt;
         }
+        if let Some(s) = self.ship.as_mut().filter(|s| s.hit.is_none()) {
+            s.vel += s.acc * (0.5 * dt);
+            s.pos += s.vel * dt;
+        }
         self.compute_accelerations();
+        self.step_ship(dt);
         let trail_scale = self.trail_interval;
         let trail_len = self.trail_len;
         for b in &mut self.bodies {
@@ -296,6 +356,52 @@ impl Universe {
             self.compute_accelerations();
             self.contacts.clear();
         }
+    }
+
+    /// Gravitational acceleration on a massless point at `pos`.
+    pub fn gravity_at(&self, pos: DVec3) -> DVec3 {
+        let mut a = DVec3::ZERO;
+        for b in &self.bodies {
+            let d = b.pos - pos;
+            let s = d.length_squared() + 0.0025;
+            a += d * (b.mass * self.g / (s * s.sqrt()));
+        }
+        a
+    }
+
+    /// Velocity of the ground of body `b` at world point `at` (orbital motion plus spin).
+    pub fn ground_velocity(b: &Body, at: DVec3) -> DVec3 {
+        b.vel + (b.axis().as_dvec3() * b.spin_rate).cross(at - b.pos)
+    }
+
+    /// Second half of the ship's leapfrog step, then a ground-contact test.
+    fn step_ship(&mut self, dt: f64) {
+        let Some(mut s) = self.ship.take() else { return };
+        if s.hit.is_none() {
+            s.acc = self.gravity_at(s.pos) + s.thrust;
+            s.vel += s.acc * (0.5 * dt);
+            for b in &self.bodies {
+                let d = s.pos - b.pos;
+                let dist = d.length();
+                // Cheap bounding test first; the exact terrain height only when close.
+                if dist > b.radius * (1.0 + crate::terrain::max_displacement(b)) + s.radius {
+                    continue;
+                }
+                let normal = d.try_normalize().unwrap_or(DVec3::Y);
+                let ground = if crate::terrain::has_solid_surface(b.kind) {
+                    crate::terrain::surface_radius_world(b, &self.paint, normal)
+                } else {
+                    b.radius
+                };
+                if dist < ground + s.radius {
+                    s.pos = b.pos + normal * (ground + s.radius);
+                    let speed = (s.vel - Self::ground_velocity(b, s.pos)).length();
+                    s.hit = Some(ShipHit { body: b.id, speed, normal });
+                    break;
+                }
+            }
+        }
+        self.ship = Some(s);
     }
 
     fn compute_accelerations(&mut self) {
@@ -994,9 +1100,28 @@ impl Universe {
     /// Predict the path of a massless test body launched at pos/vel.
     /// Returns sampled points and the index of the body it would hit (if any).
     pub fn predict(&self, pos: DVec3, vel: DVec3, horizon: f64, steps: usize) -> (Vec<DVec3>, Option<usize>) {
+        self.predict_relative(pos, vel, horizon, steps, None)
+    }
+
+    /// Like [`predict`](Self::predict), but with `relative_to` (a body index) the path is
+    /// drawn as seen from that body: where the craft will be around it, placed at the
+    /// body's current position. That is the useful picture when flying near a planet
+    /// that is itself racing around its star.
+    pub fn predict_relative(&self, pos: DVec3, vel: DVec3, horizon: f64, steps: usize, relative_to: Option<usize>) -> (Vec<DVec3>, Option<usize>) {
         let mut idx: Vec<usize> = (0..self.bodies.len()).collect();
         idx.sort_by(|a, b| self.bodies[*b].mass.total_cmp(&self.bodies[*a].mass));
         idx.truncate(24);
+        let frame = relative_to.filter(|r| *r < self.bodies.len()).map(|r| match idx.iter().position(|i| *i == r) {
+            Some(k) => k,
+            None => {
+                // A small moon outside the heaviest 24: it still has to be simulated.
+                if idx.len() >= 24 {
+                    idx.pop();
+                }
+                idx.push(r);
+                idx.len() - 1
+            }
+        });
         let mut bp: Vec<DVec3> = idx.iter().map(|&i| self.bodies[i].pos).collect();
         let mut bv: Vec<DVec3> = idx.iter().map(|&i| self.bodies[i].vel).collect();
         let bm: Vec<f64> = idx.iter().map(|&i| self.bodies[i].mass * self.g).collect();
@@ -1007,6 +1132,12 @@ impl Universe {
         let dt = horizon / steps as f64;
         let mut out = Vec::with_capacity(steps / 4 + 2);
         out.push(p);
+        let frame_start = frame.map(|k| bp[k]);
+        // Shift a point by how far the reference body has moved since the start.
+        let seen = |p: DVec3, bp: &[DVec3]| match (frame, frame_start) {
+            (Some(k), Some(start)) => p - (bp[k] - start),
+            _ => p,
+        };
         let mut ba = vec![DVec3::ZERO; n];
         let accel = |bp: &[DVec3], ba: &mut [DVec3]| {
             for a in ba.iter_mut() {
@@ -1047,11 +1178,11 @@ impl Universe {
             }
             v += pa * (0.5 * dt);
             if step % 4 == 0 {
-                out.push(p);
+                out.push(seen(p, &bp));
             }
             for i in 0..n {
                 if (bp[i] - p).length_squared() < br[i] * br[i] {
-                    out.push(p);
+                    out.push(seen(p, &bp));
                     return (out, Some(idx[i]));
                 }
             }

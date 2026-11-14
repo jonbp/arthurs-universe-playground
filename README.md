@@ -6,6 +6,9 @@ A space sandbox written in **Rust + Vulkan**. Start with the Solar System, then:
 - **Spawn new worlds.** Click to drop a planet into a circular orbit, or click-and-drag to fling it, with a live predicted trajectory (it turns red if it's going to crash).
 - **Smash planets together.** Collisions use an impact-energy model: gentle hits merge (leaving craters and molten scars), harder ones shatter worlds into glowing fragments and debris that can re-accrete.
 - **Create your own universe.** Pick a centre (Sun-like star, red dwarf, blue giant, binary, black hole, nothing), the number of planets, moons, belts, rings, gravity strength and chaos.
+- **Fly rockets.** Pick one of six rockets, lift off from any solid world and fly under real gravity, with a chase camera or from the cockpit. Land gently, or crash spectacularly.
+- **Walk on worlds.** Stand on a planet, moon or asteroid, walk over its terrain and jump in its gravity. Climb out of a landed rocket and back in.
+- **See what it's like there.** Every world reports its temperature, gravity, air, sunlight and whether people could live on it.
 - **Cosmic phenomena:**
   - **Black holes:** accretion disks with Doppler beaming, gravitational lensing, and tidal disruption ("spaghettification").
   - **Supernovae:** a blast wave that pushes and scorches planets, an expanding nebula, and a neutron-star or black-hole remnant.
@@ -46,12 +49,40 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 | Scroll / pinch | Zoom |
 | Middle-drag / Shift+drag | Pan |
 | Double-click / `F` | Follow selected body |
-| `1`–`4` | Select / Spawn / Terraform / Smash tools |
+| `1`–`6` | Select / Spawn / Terraform / Smash / Fly / Walk tools |
 | `Space` | Pause |
 | `[` `]` or `-` `+` | Slow down / speed up time |
 | `B` | Asteroid barrage at selection |
 | `Del` | Delete selection |
 | `T` / `L` / `H` | Trails / labels / hide UI |
+
+Flying (Fly tool, then click a world or press **Launch**):
+
+| Input | Action |
+|---|---|
+| `W` `S` / `A` `D` / `Q` `E` | Tilt / turn / roll (arrow keys also steer) |
+| `Shift` / `Ctrl` | Throttle up / down (`Z` full, `X` off) |
+| `R` | Brake assist: hold the nose against your direction of travel |
+| `V` | Cockpit or outside view (drag to orbit, scroll to zoom) |
+| `G` | Get out and walk (when landed) |
+| `Enter` | Launch a new rocket after a crash |
+| `Esc` | Back to the sandbox |
+
+Walking (Walk tool, then click a rocky world):
+
+| Input | Action |
+|---|---|
+| `W` `A` `S` `D` | Walk (`Shift` to run) |
+| Drag / `←` `→` | Look around / turn |
+| `Space` | Jump |
+| `G` | Climb into your rocket, or call one |
+| `Esc` | Back to the sandbox |
+
+Time slows down automatically when you fly (0.2×) or walk (0.1×), because the worlds are small and everything happens fast; use `[` and `]` to speed up for long trips.
+
+## Updates
+
+On startup the game makes one request to the public GitHub API to see whether a newer release exists. If there is one, a banner offers a **Download** button that opens the file for your platform in your browser. Nothing is downloaded or installed automatically. Run with `--no-update-check`, or set the `AUP_NO_UPDATE_CHECK` environment variable, to turn the check off.
 
 ## Building
 
@@ -88,13 +119,19 @@ CI (`.github/workflows/ci.yml`) builds and tests on Windows, macOS and Linux for
   - Black holes disrupt bodies inside the tidal radius r_t = R·(2M/m)^⅓.
   - Supernovae send out a shock front that applies impulses and scorches surfaces.
   - Particles (debris, nebulae, galaxy stars) are test masses pulled by the most massive bodies.
+  - The rocket is a massless craft integrated inside the same leapfrog step, so it stays exact at any time warp.
+- **Exploring** (`src/explore.rs`, `src/rocket.rs`, `src/terrain.rs`, `src/conditions.rs`):
+  - `terrain.rs` is a CPU copy of the planet shader's height function. Both hash the noise lattice with integer maths, which is bit-exact on every GPU, so the ground you stand on is the ground that is drawn.
+  - A landed rocket and a walking astronaut are stored in the body's own rotating coordinates, so the ground stays still underfoot while the planet spins and orbits.
+  - `conditions.rs` is a small climate model (starlight, albedo, greenhouse warming from air pressure, internal heat), calibrated so the Solar System preset lands near the real temperatures.
+- **Updates** (`src/update.rs`): a background thread asks the GitHub releases API for the latest tag and compares it with the built version.
 - **Rendering** (`src/renderer.rs`, `shaders/`): raw Vulkan through `ash`.
   - Shaders are written in WGSL and compiled to SPIR-V at build time by `naga` (see `build.rs`), so no shader SDK is needed.
   - A reverse-Z HDR scene pass draws instanced procedural planets with vertex displacement, bump-mapped terrain, oceans, clouds and atmospheres, plus the paint texture array. Rings, accretion disks, additive particles and trails follow.
   - A blit-generated mip chain provides bloom. The composite pass applies point-lens gravitational lensing and ACES tonemapping. The egui UI is drawn on top.
   - Rendering is camera-relative, so f32 precision holds even across galaxy-sized scenes.
-- **Tests**: `cargo test --release` covers orbit stability, momentum conservation, shattering, supernova remnants, spaghettification, trajectory prediction, the paint brushes, every preset, and the tools driven through the input layer.
+- **Tests**: `cargo test --release` covers orbit stability, momentum conservation, shattering, supernova remnants, spaghettification, trajectory prediction, the paint brushes, every preset, the tools driven through the input layer, lift-off, landing, crashing, walking and jumping, the climate model, and the update check's version and link handling.
 
 The UI font is [Inter](https://rsms.me/inter/) (SIL Open Font License, see `assets/fonts/Inter-LICENSE.txt`). It is compiled into the binary. UI icons are a custom line-icon set drawn as vectors (`src/icons.rs`): 24-unit grid, round caps, one stroke weight, so they stay sharp at any size and never depend on font glyphs.
 
-Developer flags for automated screenshots: `--preset <name> --focus <body> --zoom <d> --speed <x> --screenshot out.bmp --frames N --hide-ui`. `--icons` (or `--glyph-test`) shows the whole icon set at large and small sizes (see `--help`).
+Developer flags for automated screenshots: `--preset <name> --focus <body> --zoom <d> --speed <x> --screenshot out.bmp --frames N --hide-ui`. `--fly <body>`, `--walk <body>`, `--rocket <0-5>`, `--cockpit` and `--hold <key,key>` start in flight or on foot, and `--assume-version <x.y.z>` tests the update banner. `--icons` (or `--glyph-test`) shows the whole icon set at large and small sizes (see `--help`).

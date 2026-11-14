@@ -89,9 +89,23 @@ impl Camera {
     }
 
     pub fn frame(&self, width: f32, height: f32) -> CameraFrame {
-        let eye = self.eye();
-        let fwd = self.forward().as_vec3().normalize();
-        let right = fwd.cross(Vec3::Y).normalize();
+        let near = (self.distance * 0.002).clamp(0.005, 2.0) as f32;
+        CameraFrame::look(self.eye(), self.forward(), DVec3::Y, self.fov_y, near, width, height)
+    }
+}
+
+impl CameraFrame {
+    /// A view from `eye` along `forward`, with `up_hint` deciding which way is up
+    /// (any vector not parallel to `forward`). Used by the orbit camera, the
+    /// rocket's cockpit and chase cameras, and the astronaut's eyes.
+    pub fn look(eye: DVec3, forward: DVec3, up_hint: DVec3, fov_y: f32, near: f32, width: f32, height: f32) -> CameraFrame {
+        let fwd = forward.as_vec3().try_normalize().unwrap_or(Vec3::NEG_Z);
+        let hint = up_hint.as_vec3();
+        let right = fwd
+            .cross(hint)
+            .try_normalize()
+            .or_else(|| fwd.cross(Vec3::Y).try_normalize())
+            .unwrap_or_else(|| fwd.cross(Vec3::X).normalize());
         let up = right.cross(fwd);
         // Right-handed view matrix with the eye at the origin.
         let view = Mat4::from_cols(
@@ -101,10 +115,9 @@ impl Camera {
             Vec4::W,
         );
         let aspect = width / height.max(1.0);
-        let near = (self.distance * 0.002).clamp(0.005, 2.0) as f32;
         // Infinite reverse-Z perspective (depth 1 at the near plane, 0 at infinity),
         // with Y flipped because Vulkan clip space has +y pointing down.
-        let f = 1.0 / (self.fov_y * 0.5).tan();
+        let f = 1.0 / (fov_y * 0.5).tan();
         let proj = Mat4::from_cols(
             Vec4::new(f / aspect, 0.0, 0.0, 0.0),
             Vec4::new(0.0, -f, 0.0, 0.0),
@@ -112,20 +125,9 @@ impl Camera {
             Vec4::new(0.0, 0.0, near, 0.0),
         );
         let view_proj = proj * view;
-        CameraFrame {
-            eye,
-            view_proj,
-            inv_view_proj: view_proj.inverse(),
-            right,
-            up,
-            fwd,
-            tan_half: (self.fov_y * 0.5).tan(),
-            size: Vec2::new(width, height),
-        }
+        CameraFrame { eye, view_proj, inv_view_proj: view_proj.inverse(), right, up, fwd, tan_half: (fov_y * 0.5).tan(), size: Vec2::new(width, height) }
     }
-}
 
-impl CameraFrame {
     /// World-space ray direction through a pixel (physical pixels, y down).
     pub fn ray(&self, px: Vec2) -> DVec3 {
         let x = (px.x / self.size.x) * 2.0 - 1.0;

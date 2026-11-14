@@ -52,18 +52,53 @@ fn hash33(p: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(hash3(p), hash3(p + vec3<f32>(17.3, 5.1, 9.7)), hash3(p + vec3<f32>(3.7, 41.2, 23.9)));
 }
 
+// ---- Lattice hashes for terrain ----
+// The float hashes above are chaotic: one differently-rounded multiply-add (GPUs
+// are free to fuse them) gives a completely different value. That is fine for
+// stars, but terrain is also evaluated on the CPU (src/terrain.rs) so rockets can
+// land on it and people can walk on it, and there both sides must agree. These
+// hash the integer cell coordinates with integer maths, which is exact everywhere.
+fn mix32(x: u32) -> u32 {
+    var h = x;
+    h = (h ^ (h >> 16u)) * 0x7feb352du;
+    h = (h ^ (h >> 15u)) * 0x846ca68bu;
+    return h ^ (h >> 16u);
+}
+
+fn cell_hash(cell: vec3<f32>) -> u32 {
+    let c = bitcast<vec3<u32>>(vec3<i32>(cell));
+    return mix32(c.x * 0x8da6b343u ^ c.y * 0xd8163841u ^ c.z * 0xcb1ab31fu);
+}
+
+fn unit_float(h: u32) -> f32 {
+    return f32(h >> 8u) * (1.0 / 16777216.0);
+}
+
+// One value in [0, 1) per integer cell.
+fn lattice(cell: vec3<f32>) -> f32 {
+    return unit_float(cell_hash(cell));
+}
+
+// Three independent values in [0, 1) per integer cell.
+fn lattice3(cell: vec3<f32>) -> vec3<f32> {
+    let a = cell_hash(cell);
+    let b = mix32(a ^ 0x9e3779b9u);
+    let c = mix32(b ^ 0x85ebca6bu);
+    return vec3<f32>(unit_float(a), unit_float(b), unit_float(c));
+}
+
 fn noise3(x: vec3<f32>) -> f32 {
     let i = floor(x);
     let f = fract(x);
     let u = f * f * (3.0 - 2.0 * f);
-    let a = hash3(i + vec3<f32>(0.0, 0.0, 0.0));
-    let b = hash3(i + vec3<f32>(1.0, 0.0, 0.0));
-    let c = hash3(i + vec3<f32>(0.0, 1.0, 0.0));
-    let d = hash3(i + vec3<f32>(1.0, 1.0, 0.0));
-    let e = hash3(i + vec3<f32>(0.0, 0.0, 1.0));
-    let f2 = hash3(i + vec3<f32>(1.0, 0.0, 1.0));
-    let g2 = hash3(i + vec3<f32>(0.0, 1.0, 1.0));
-    let h = hash3(i + vec3<f32>(1.0, 1.0, 1.0));
+    let a = lattice(i + vec3<f32>(0.0, 0.0, 0.0));
+    let b = lattice(i + vec3<f32>(1.0, 0.0, 0.0));
+    let c = lattice(i + vec3<f32>(0.0, 1.0, 0.0));
+    let d = lattice(i + vec3<f32>(1.0, 1.0, 0.0));
+    let e = lattice(i + vec3<f32>(0.0, 0.0, 1.0));
+    let f2 = lattice(i + vec3<f32>(1.0, 0.0, 1.0));
+    let g2 = lattice(i + vec3<f32>(0.0, 1.0, 1.0));
+    let h = lattice(i + vec3<f32>(1.0, 1.0, 1.0));
     return mix(
         mix(mix(a, b, u.x), mix(c, d, u.x), u.y),
         mix(mix(e, f2, u.x), mix(g2, h, u.x), u.y),
@@ -106,7 +141,7 @@ fn craters(p: vec3<f32>, scale: f32, seed: f32) -> f32 {
         for (var y = -1; y <= 1; y = y + 1) {
             for (var x = -1; x <= 1; x = x + 1) {
                 let o = vec3<f32>(f32(x), f32(y), f32(z));
-                let rnd = hash33(i + o);
+                let rnd = lattice3(i + o);
                 let r = 0.18 + 0.3 * rnd.z * rnd.z;
                 if (rnd.x > 0.55) {
                     continue;
