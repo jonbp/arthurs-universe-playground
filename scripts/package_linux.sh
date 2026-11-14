@@ -12,7 +12,12 @@ OUT="${1:-target/release/dist}"
 STAGE="$OUT/$NAME"
 
 # build.rs renders the icon into the newest OUT_DIR for this crate.
-ICON_DIR=$(ls -td target/release/build/$BIN-*/out 2>/dev/null | while read -r d; do [ -f "$d/AppIcon-256.png" ] && echo "$d" && break; done)
+ICON_DIR=""
+for d in target/release/build/$BIN-*/out; do
+    if [ -f "$d/AppIcon-256.png" ] && { [ -z "$ICON_DIR" ] || [ "$d/AppIcon-256.png" -nt "$ICON_DIR/AppIcon-256.png" ]; }; then
+        ICON_DIR="$d"
+    fi
+done
 [ -n "$ICON_DIR" ] || { echo "error: icon not found; run cargo build --release first" >&2; exit 1; }
 
 rm -rf "$STAGE"
