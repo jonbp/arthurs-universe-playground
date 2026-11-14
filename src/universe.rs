@@ -941,7 +941,10 @@ impl Universe {
         let v = self.bodies[victim].clone();
         self.bodies[victim].alive = false;
         let b = &mut self.bodies[bh];
-        b.mass += v.mass * 0.3;
+        // The hole swallows about a third of the victim, and that third's momentum with it.
+        let eaten = v.mass * 0.3;
+        b.vel = (b.vel * b.mass + v.vel * eaten) / (b.mass + eaten);
+        b.mass += eaten;
         b.radius = black_hole_radius(b.mass);
         b.feeding = (b.feeding + 2.0).min(5.0);
         let bh_name = b.name.clone();
@@ -1572,6 +1575,23 @@ mod tests {
         assert!(most < 200, "the smash grew to {most} bodies");
         assert!(u.bodies.len() < 40, "{} bodies were still left at the end", u.bodies.len());
         assert!(u.bodies.iter().all(|b| b.mass > 1e-6), "weightless fragments were left behind");
+    }
+
+    #[test]
+    fn black_hole_takes_the_momentum_of_what_it_eats() {
+        let mut u = Universe::new("t", 5);
+        let mut bh = u.new_body("BH", BodyKind::BlackHole, DVec3::ZERO, DVec3::ZERO);
+        bh.mass = 30000.0;
+        bh.radius = black_hole_radius(bh.mass);
+        let id = u.add(bh);
+        // Already inside the tidal radius, crossing sideways.
+        let p = u.new_body("Victim", BodyKind::Earthlike, DVec3::new(15.0, 0.0, 0.0), DVec3::new(0.0, 0.0, 20.0)).with_mass_radius(40.0, 2.0);
+        u.add(p);
+        u.update(0.004, 1.0, false);
+        assert_eq!(u.bodies.len(), 1);
+        let b = u.get(id).unwrap();
+        // It swallows 30% of the victim: 12 units of mass moving at 20.
+        assert!((b.vel.z * b.mass - 240.0).abs() < 1.0, "sideways momentum {}", b.vel.z * b.mass);
     }
 
     #[test]
