@@ -29,7 +29,7 @@ pub struct Globals {
 }
 
 /// How many UI panels can blur the scene behind them at once.
-pub const MAX_UI_BLUR: usize = 4;
+pub const MAX_UI_BLUR: usize = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]

@@ -188,12 +188,18 @@ fn blur_rects_id() -> Id {
     Id::new("ui_blur_rects")
 }
 
-/// A side panel with the scene blurred behind it. Its rect is recorded for the renderer.
-fn window_panel<R>(ctx: &egui::Context, id: &str, anchor: Align2, offset: Vec2, margin: i8, add: impl FnOnce(&mut Ui) -> R) -> R {
-    let r = egui::Area::new(Id::new(id)).anchor(anchor, offset).show(ctx, |ui| window(margin).show(ui, add).inner);
+/// A panel in `frame` (built from [`window`]) with the scene blurred behind it. Its rect is
+/// recorded for the renderer.
+fn frosted_panel<R>(ctx: &egui::Context, id: &str, anchor: Align2, offset: Vec2, frame: Frame, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let r = egui::Area::new(Id::new(id)).anchor(anchor, offset).show(ctx, |ui| frame.show(ui, add).inner);
     let rect = r.response.rect;
     ctx.data_mut(|d| d.get_temp_mut_or_default::<Vec<Rect>>(blur_rects_id()).push(rect));
     r.inner
+}
+
+/// A frosted panel with even padding (tool card, inspector, settings, flight and walking).
+fn window_panel<R>(ctx: &egui::Context, id: &str, anchor: Align2, offset: Vec2, margin: i8, add: impl FnOnce(&mut Ui) -> R) -> R {
+    frosted_panel(ctx, id, anchor, offset, window(margin), add)
 }
 
 /// Rects (in points) of this frame's frosted panels, and their corner radius in points.
@@ -1457,8 +1463,8 @@ fn event_log(ctx: &egui::Context, game: &Game) {
 
     if !open {
         // Collapsed: icon, newest message, expand chevron. The whole pill is the button.
-        let frame = glass(0).corner_radius(12).inner_margin(Margin::symmetric(10, 6));
-        let clicked = floating(ctx, "event_log", anchor, offset, frame, |ui| {
+        let frame = window(0).inner_margin(Margin::symmetric(10, 6));
+        let clicked = frosted_panel(ctx, "event_log", anchor, offset, frame, |ui| {
             let resp = ui
                 .horizontal(|ui| {
                     ui.set_max_width(LOG_W - 20.0);
@@ -1476,8 +1482,8 @@ fn event_log(ctx: &egui::Context, game: &Game) {
             open = true;
         }
     } else {
-        let frame = glass(0).corner_radius(14).inner_margin(Margin { left: 10, right: 6, top: 6, bottom: 10 });
-        floating(ctx, "event_log", anchor, offset, frame, |ui| {
+        let frame = window(0).inner_margin(Margin { left: 10, right: 6, top: 6, bottom: 10 });
+        frosted_panel(ctx, "event_log", anchor, offset, frame, |ui| {
             ui.set_width(LOG_W);
             // Areas reuse last frame's size as max_rect; lift it so the console can reach full height.
             ui.set_max_height(400.0);

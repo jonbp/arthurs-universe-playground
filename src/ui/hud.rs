@@ -239,7 +239,7 @@ pub(super) fn flight_hud(ctx: &egui::Context, game: &mut Game) {
     }
     let mut act = None;
     let width = hud_width(ctx);
-    floating(ctx, "flight_hud", Align2::CENTER_BOTTOM, vec2(0.0, -EDGE), glass(12), |ui| {
+    window_panel(ctx, "flight_hud", Align2::CENTER_BOTTOM, vec2(0.0, -EDGE), 12, |ui| {
         ui.set_width(width);
         let (status, status_color) = match (&info.destroyed, &info.landed_on, &info.near) {
             (Some(reason), _, _) => (reason.clone(), DANGER),
@@ -352,7 +352,7 @@ pub(super) fn walk_hud(ctx: &egui::Context, game: &mut Game) {
     let WalkInfo { body, ground, conditions: c, local_temp_k, sky, airborne, rocket, .. } = &info;
     let (mut board, mut exit) = (false, false);
     let width = hud_width(ctx);
-    floating(ctx, "walk_hud", Align2::CENTER_BOTTOM, vec2(0.0, -EDGE), glass(12), |ui| {
+    window_panel(ctx, "walk_hud", Align2::CENTER_BOTTOM, vec2(0.0, -EDGE), 12, |ui| {
         ui.set_width(width);
         let status = if *airborne > 0.0005 { format!("Jumping!  {:.0}× your own height", airborne / crate::explore::EYE_HEIGHT) } else { format!("{ground}  ·  {sky}") };
         hud_header(ui, Icon::Astronaut, &format!("Standing on {body}"), &status, MUTED, |ui| {

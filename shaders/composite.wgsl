@@ -21,11 +21,12 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> COut {
 fn ui_blur_mask(px: vec2<f32>) -> f32 {
     var m = 0.0;
     let n = i32(g.ui_blur_params.x);
-    let r = g.ui_blur_params.y;
     for (var i = 0; i < n; i = i + 1) {
         let rect = g.ui_blur[i] * vec4<f32>(g.screen.xy, g.screen.xy);
         let c = (rect.xy + rect.zw) * 0.5;
         let half = (rect.zw - rect.xy) * 0.5;
+        // Short pills get rounder corners than they can hold: clamp like egui does.
+        let r = min(g.ui_blur_params.y, min(half.x, half.y));
         // Signed distance to a rounded rectangle.
         let q = abs(px - c) - half + vec2<f32>(r);
         let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
