@@ -163,18 +163,57 @@ pub fn setup_style(ctx: &egui::Context) {
 
 // ── Building blocks ────────────────────────────────────────────────────────
 
-/// Translucent rounded panel with a soft drop shadow.
+/// Panels over the scene have no box: just a soft dark haze behind them, dark enough
+/// under the content to read and feathered at the edges so the universe shows around it.
 fn glass(margin: i8) -> Frame {
     Frame::new()
-        .fill(GLASS)
+        .corner_radius(28)
+        .inner_margin(Margin::same(margin))
+        // Spread pushes the full-strength part out past the content, so text near a panel's
+        // edge is as readable as text in the middle; the blur then fades it into the scene.
+        .shadow(Shadow { offset: [0, 0], blur: 80, spread: 24, color: Color32::from_black_alpha(95) })
+}
+
+/// Corner radius of the side panels, in points (the renderer's blur matches it).
+const WINDOW_RADIUS: u8 = 18;
+
+/// Side panels that open over the scene (tool card, inspector, settings): frosted glass.
+/// The renderer blurs the scene behind them (see [`window_panel`]); this is the 50% black
+/// tint on top. No border and no shadow, which would darken it past 50%.
+fn window(margin: i8) -> Frame {
+    Frame::new().fill(Color32::from_black_alpha(128)).corner_radius(WINDOW_RADIUS).inner_margin(Margin::same(margin))
+}
+
+fn blur_rects_id() -> Id {
+    Id::new("ui_blur_rects")
+}
+
+/// A side panel with the scene blurred behind it. Its rect is recorded for the renderer.
+fn window_panel<R>(ctx: &egui::Context, id: &str, anchor: Align2, offset: Vec2, margin: i8, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let r = egui::Area::new(Id::new(id)).anchor(anchor, offset).show(ctx, |ui| window(margin).show(ui, add).inner);
+    let rect = r.response.rect;
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Vec<Rect>>(blur_rects_id()).push(rect));
+    r.inner
+}
+
+/// Rects (in points) of this frame's frosted panels, and their corner radius in points.
+/// Clears the list, so call it once per frame after drawing the UI.
+pub fn take_blur_rects(ctx: &egui::Context) -> (Vec<Rect>, f32) {
+    (ctx.data_mut(|d| std::mem::take(d.get_temp_mut_or_default::<Vec<Rect>>(blur_rects_id()))), WINDOW_RADIUS as f32)
+}
+
+/// Solid version for things that take your full attention (menus, dialogs).
+fn solid(margin: i8) -> Frame {
+    Frame::new()
+        .fill(GLASS_SOLID)
         .stroke(Stroke::new(1.0, white(20)))
         .corner_radius(18)
         .inner_margin(Margin::same(margin))
-        .shadow(Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(100) })
+        .shadow(Shadow { offset: [0, 10], blur: 40, spread: 0, color: Color32::from_black_alpha(140) })
 }
 
 fn popup_frame() -> Frame {
-    glass(10).fill(GLASS_SOLID).corner_radius(16)
+    solid(10).corner_radius(16)
 }
 
 /// A panel that floats over the scene, anchored to a screen corner/edge.
@@ -235,9 +274,9 @@ fn tile(ui: &mut Ui, icon: Icon, label: &str, selected: bool, size: Vec2, tint: 
         let t = hover_t(ui, &resp);
         let p = ui.painter();
         let (bg, stroke) = if selected {
-            (ACCENT_BG, Stroke::new(1.5, ACCENT))
+            (ACCENT_BG, Stroke::NONE)
         } else {
-            (white(7 + (t * 12.0) as u8), Stroke::new(1.0, white(10 + (t * 22.0) as u8)))
+            (white((t * 14.0) as u8), Stroke::NONE)
         };
         p.rect(rect, 12, bg, stroke, StrokeKind::Inside);
         let icon_size = (size.y * 0.4).clamp(16.0, 28.0).round();
@@ -276,7 +315,7 @@ fn chip(ui: &mut Ui, icon: Option<(Icon, Color32)>, text: &str, min_w: f32, chev
     if ui.is_rect_visible(rect) {
         let t = hover_t(ui, &resp);
         let p = ui.painter();
-        p.rect(rect, 10, white(10 + (t * 14.0) as u8), Stroke::new(1.0, white(14 + (t * 20.0) as u8)), StrokeKind::Inside);
+        p.rect_filled(rect, 10, white((t * 16.0) as u8));
         let content_w = galley.size().x + icon_w + chev_w;
         let mut x = rect.center().x - content_w / 2.0;
         if let Some((ic, color)) = icon {
@@ -300,9 +339,9 @@ fn option_button(ui: &mut Ui, icon: Icon, label: &str, selected: bool, size: Vec
         let t = hover_t(ui, &resp);
         let p = ui.painter();
         let (bg, stroke, fg) = if selected {
-            (ACCENT_BG, Stroke::new(1.5, ACCENT), ACCENT)
+            (ACCENT_BG, Stroke::NONE, ACCENT)
         } else {
-            (white(8 + (t * 12.0) as u8), Stroke::new(1.0, white(14 + (t * 20.0) as u8)), mix(MUTED, TEXT, t))
+            (white((t * 14.0) as u8), Stroke::NONE, mix(MUTED, TEXT, t))
         };
         p.rect(rect, 10, bg, stroke, StrokeKind::Inside);
         let galley = p.layout_no_wrap(label.to_string(), FontId::proportional(12.5), fg);
@@ -671,7 +710,7 @@ fn universe_dropdown(ui: &mut Ui, game: &mut Game) {
         let (rect, resp) = ui.allocate_exact_size(vec2(10.0 + 18.0 + 10.0 + text_w + 28.0, 36.0), Sense::click());
         let t = hover_t(ui, &resp);
         let p = ui.painter();
-        p.rect_filled(rect, 11, white(8 + (t * 14.0) as u8));
+        p.rect_filled(rect, 11, white((t * 14.0) as u8));
         Icon::Galaxy.paint(p, Rect::from_min_size(egui::pos2(rect.left() + 10.0, rect.center().y - 9.0), Vec2::splat(18.0)), ACCENT);
         let tx = rect.left() + 38.0;
         p.galley(egui::pos2(tx, rect.top() + 3.0), caption, FAINT);
@@ -924,7 +963,7 @@ fn tool_dock(ctx: &egui::Context, game: &mut Game) {
 fn tool_card(ctx: &egui::Context, game: &mut Game, open: &mut bool) {
     let x = EDGE + DOCK_BTN + 14.0 + 2.0 + 10.0;
     let max_h = (ctx.content_rect().height() - BELOW_BARS - 210.0).max(200.0);
-    floating(ctx, "tool_card", Align2::LEFT_TOP, vec2(x, BELOW_BARS), glass(14), |ui| {
+    window_panel(ctx, "tool_card", Align2::LEFT_TOP, vec2(x, BELOW_BARS), 14, |ui| {
         ui.set_width(CARD_W);
         ui.set_max_height(max_h + 60.0);
         let tool = game.tool;
@@ -1102,7 +1141,7 @@ enum Action {
 }
 
 fn stat_cell(ui: &mut Ui, label: &str, value: &str, color: Color32, w: f32) {
-    Frame::new().fill(white(7)).corner_radius(10).inner_margin(Margin::symmetric(9, 6)).show(ui, |ui| {
+    Frame::new().corner_radius(10).inner_margin(Margin::symmetric(9, 6)).show(ui, |ui| {
         ui.set_width(w - 18.0);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
@@ -1140,7 +1179,7 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
     let conditions = crate::conditions::conditions(&game.universe, &game.universe.bodies[idx]);
     let solid = crate::terrain::has_solid_surface(game.universe.bodies[idx].kind);
 
-    floating(ctx, "inspector", Align2::RIGHT_TOP, vec2(-EDGE, BELOW_BARS), glass(14), |ui| {
+    window_panel(ctx, "inspector", Align2::RIGHT_TOP, vec2(-EDGE, BELOW_BARS), 14, |ui| {
         ui.set_width(INSPECTOR_W);
         // Areas reuse last frame's size as max_rect; lift it so the scroll area can grow.
         ui.set_max_height(max_h);
@@ -1457,7 +1496,7 @@ fn event_log(ctx: &egui::Context, game: &Game) {
             ui.add_space(2.0);
             // Console body.
             let row_h = ui.fonts_mut(|f| f.row_height(&mono)) + 5.0;
-            Frame::new().fill(Color32::from_black_alpha(110)).corner_radius(9).inner_margin(Margin::symmetric(9, 6)).show(ui, |ui| {
+            Frame::new().corner_radius(9).inner_margin(Margin::symmetric(9, 6)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let body_h = row_h * (log.len() as f32).min(LOG_ROWS);
                 egui::ScrollArea::vertical()
@@ -1560,7 +1599,7 @@ fn stats_bar(ctx: &egui::Context, game: &Game) {
 // ── Modals ─────────────────────────────────────────────────────────────────
 
 fn modal(id: &str) -> egui::Modal {
-    egui::Modal::new(Id::new(id)).frame(glass(20).fill(GLASS_SOLID).corner_radius(20)).backdrop_color(Color32::from_black_alpha(110))
+    egui::Modal::new(Id::new(id)).frame(solid(20).corner_radius(20)).backdrop_color(Color32::from_black_alpha(110))
 }
 
 fn custom_modal(ctx: &egui::Context, game: &mut Game) {

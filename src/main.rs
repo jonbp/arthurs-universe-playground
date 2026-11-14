@@ -481,6 +481,16 @@ impl State {
             time: self.game.real_time as f32,
         };
         scene::build_frame(&mut self.frame_data, &self.game.universe, &cam, &opts, &self.game.preview, &self.extras);
+        // Frosted side panels: tell the composite pass where to blur the scene (screen uv).
+        let (rects, radius) = ui::take_blur_rects(&self.egui_ctx);
+        let win = self.window.inner_size();
+        let (ww, wh) = (win.width.max(1) as f32, win.height.max(1) as f32);
+        let globals = &mut self.frame_data.globals;
+        let n = rects.len().min(gpu_types::MAX_UI_BLUR);
+        for (slot, r) in globals.ui_blur.iter_mut().zip(&rects) {
+            *slot = [r.min.x * ppp / ww, r.min.y * ppp / wh, r.max.x * ppp / ww, r.max.y * ppp / wh];
+        }
+        globals.ui_blur_params = [n as f32, radius * ppp, 0.0, 0.0];
         let prims = self.egui_ctx.tessellate(output.shapes, output.pixels_per_point);
 
         self.frame_count += 1;

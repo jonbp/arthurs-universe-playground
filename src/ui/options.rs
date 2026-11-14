@@ -22,7 +22,8 @@ fn choice_row<T: Copy + PartialEq>(ui: &mut Ui, label: &str, value: &mut T, opti
             ui.label(muted(label));
         });
         let (track, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
-        ui.painter().rect_filled(track, 8, white(8));
+        // Faint underline instead of a filled track.
+        ui.painter().hline(track.x_range(), track.bottom() - 0.5, Stroke::new(1.0, white(18)));
         let w = track.width() / options.len() as f32;
         for (i, &o) in options.iter().enumerate() {
             let r = Rect::from_min_size(egui::pos2(track.left() + w * i as f32, track.top()), vec2(w, track.height())).shrink(2.0);
@@ -87,7 +88,7 @@ pub(super) fn settings_panel(ctx: &egui::Context, game: &mut Game, cam: &CameraF
     // Which tab is open is remembered for as long as the game runs.
     let tab_id = Id::new("settings_tab");
     let mut tab: Tab = ctx.data(|d| d.get_temp(tab_id)).unwrap_or_default();
-    floating(ctx, "settings_panel", Align2::RIGHT_TOP, vec2(-EDGE, BELOW_BARS), glass(14), |ui| {
+    window_panel(ctx, "settings_panel", Align2::RIGHT_TOP, vec2(-EDGE, BELOW_BARS), 14, |ui| {
         ui.set_width(PANEL_W);
         ui.set_max_height(max_h);
         close = card_header(ui, Icon::Gear, "Settings", Some("Saved automatically"), true);

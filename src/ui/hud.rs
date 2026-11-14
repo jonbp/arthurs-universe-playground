@@ -43,7 +43,7 @@ fn meter_row(ui: &mut Ui, label: &str, frac: f32, value: &str, color: Color32) {
 
 /// A stat cell with a bar in it (throttle, fuel).
 fn meter_cell(ui: &mut Ui, label: &str, frac: f32, value: &str, color: Color32, w: f32) {
-    Frame::new().fill(white(7)).corner_radius(10).inner_margin(Margin::symmetric(9, 6)).show(ui, |ui| {
+    Frame::new().corner_radius(10).inner_margin(Margin::symmetric(9, 6)).show(ui, |ui| {
         ui.set_width(w - 18.0);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 1.0;

@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A more immersive look: the top bars, tool dock, event log, hint bar and flight and walking panels no longer sit in solid boxes. Each floats on a light haze that fades into space around it, and buttons, tiles and stat cells only light up when you hover or pick them. The windows that open beside the scene (tool cards, inspector, Settings) are frosted glass: the universe behind them is blurred and darkened, with no border. Menus and dialogs stay solid.
 - Settings are split into tabs with icons: Display, Graphics, Sound, Interface and Gameplay, so the panel no longer scrolls on and on.
 - Linux builds need the ALSA development headers (`libasound2-dev`), and the game uses `libasound2` at run time for sound.
 

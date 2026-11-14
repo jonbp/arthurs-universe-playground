@@ -22,7 +22,14 @@ pub struct Globals {
     pub sky: [f32; 4],
     /// xyz = "up" where the camera is, w = sunlight reaching solid models (0..1).
     pub sky_up: [f32; 4],
+    /// UI panels with the scene blurred behind them: screen uv rects (x0, y0, x1, y1).
+    pub ui_blur: [[f32; 4]; MAX_UI_BLUR],
+    /// x = number of `ui_blur` rects, y = their corner radius in pixels.
+    pub ui_blur_params: [f32; 4],
 }
+
+/// How many UI panels can blur the scene behind them at once.
+pub const MAX_UI_BLUR: usize = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]

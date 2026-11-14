@@ -19,4 +19,8 @@ struct Globals {
     sky: vec4<f32>,
     // xyz = "up" at the camera, w = sunlight reaching solid models (0 in a planet's shadow)
     sky_up: vec4<f32>,
+    // Screen uv rects (x0, y0, x1, y1) of UI panels that blur the scene behind them
+    ui_blur: array<vec4<f32>, 4>,
+    // x = ui_blur count, y = corner radius (px)
+    ui_blur_params: vec4<f32>,
 };

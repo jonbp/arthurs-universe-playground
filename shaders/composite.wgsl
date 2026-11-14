@@ -17,6 +17,39 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> COut {
     return out;
 }
 
+/// 1 inside a UI panel that blurs what's behind it, 0 outside (rounded corners, 1 px soft edge).
+fn ui_blur_mask(px: vec2<f32>) -> f32 {
+    var m = 0.0;
+    let n = i32(g.ui_blur_params.x);
+    let r = g.ui_blur_params.y;
+    for (var i = 0; i < n; i = i + 1) {
+        let rect = g.ui_blur[i] * vec4<f32>(g.screen.xy, g.screen.xy);
+        let c = (rect.xy + rect.zw) * 0.5;
+        let half = (rect.zw - rect.xy) * 0.5;
+        // Signed distance to a rounded rectangle.
+        let q = abs(px - c) - half + vec2<f32>(r);
+        let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+        m = max(m, clamp(0.5 - d, 0.0, 1.0));
+    }
+    return m;
+}
+
+/// A soft blur of the scene: a 3x3 tent over a small mip, smoothed further by a smaller one.
+fn blurred_scene(uv: vec2<f32>) -> vec3<f32> {
+    let texel = 8.0 / g.screen.xy;
+    var acc = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let w = (2.0 - abs(f32(x))) * (2.0 - abs(f32(y)));
+            let o = vec2<f32>(f32(x), f32(y)) * texel * 1.5;
+            acc = acc + textureSampleLevel(hdr_tex, hdr_samp, uv + o, 3.0).rgb * w;
+            wsum = wsum + w;
+        }
+    }
+    return mix(acc / wsum, textureSampleLevel(hdr_tex, hdr_samp, uv, 4.0).rgb, 0.35);
+}
+
 fn aces(x: vec3<f32>) -> vec3<f32> {
     let a = 2.51;
     let b = 0.03;
@@ -52,6 +85,11 @@ fn fs_main(in: COut) -> @location(0) vec4<f32> {
 
     uv = clamp(uv, vec2<f32>(0.0005), vec2<f32>(0.9995));
     var col = textureSampleLevel(hdr_tex, hdr_samp, uv, 0.0).rgb;
+    // Frosted glass behind side panels: the scene there is blurred (the panel's tint is drawn by the UI).
+    let blur = ui_blur_mask(in.uv * g.screen.xy);
+    if (blur > 0.0) {
+        col = mix(col, blurred_scene(uv), blur);
+    }
 
     // Cheap wide bloom from the blit-generated mip chain
     var bloom = vec3<f32>(0.0);

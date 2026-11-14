@@ -217,6 +217,8 @@ pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts:
         black_holes: [[0.0; 4]; MAX_BLACK_HOLES],
         sky: extras.sky,
         sky_up: extras.sky_up,
+        ui_blur: [[0.0; 4]; crate::gpu_types::MAX_UI_BLUR],
+        ui_blur_params: [0.0; 4],
     };
     for (i, (p, r, c)) in lights.iter().enumerate() {
         globals.light_pos[i] = [p.x, p.y, p.z, *r];
