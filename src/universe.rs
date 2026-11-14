@@ -727,6 +727,7 @@ impl Universe {
         let m_tot = b.mass + s.mass;
         let com_vel = (b.vel * b.mass + s.vel * s.mass) / m_tot;
         let rel_v = (s.vel - b.vel).length();
+        let first_fragment = self.bodies.len();
         if !s.name.is_empty() && !b.name.is_empty() {
             self.event(format!("💥 {} smashed into {} at speed {:.1}!", s.name, b.name, rel_v));
         }
@@ -765,6 +766,19 @@ impl Universe {
             }
             let ang = ((s.radius / b.radius) as f32 * 1.4).clamp(0.12, 1.4);
             self.crater(big, n, ang, 1.0);
+        }
+
+        // The pieces fly apart in random directions, which on its own would hand the
+        // wreckage a sideways kick out of nowhere. Shift them all together so that,
+        // as a whole, it carries on exactly as the two worlds were moving.
+        let wreckage = || (first_fragment..self.bodies.len()).chain(self.bodies[big].alive.then_some(big));
+        let mass: f64 = wreckage().map(|i| self.bodies[i].mass).sum();
+        if mass > 0.0 {
+            let momentum: DVec3 = wreckage().map(|i| self.bodies[i].vel * self.bodies[i].mass).sum();
+            let shift = com_vel - momentum / mass;
+            for i in wreckage().collect::<Vec<_>>() {
+                self.bodies[i].vel += shift;
+            }
         }
 
         // Debris cloud and bright flash.
@@ -1477,6 +1491,29 @@ mod tests {
         u.update_particles(0.05);
         assert_eq!(u.particles.len(), reference.len());
         assert!(u.particles.iter().zip(&reference).all(|(x, y)| x.pos == y.pos && x.vel == y.vel && x.life == y.life));
+    }
+
+    #[test]
+    fn shattering_conserves_momentum() {
+        let mut u = Universe::new("t", 3);
+        u.collisions = CollisionMode::AlwaysShatter;
+        let a = u.new_body("A", BodyKind::Earthlike, DVec3::new(-10.0, 0.0, 0.0), DVec3::new(15.0, 2.0, 0.0)).with_mass_radius(60.0, 2.3);
+        let b = u.new_body("B", BodyKind::Rocky, DVec3::new(10.0, 0.0, 0.5), DVec3::new(-15.0, 0.0, 0.0)).with_mass_radius(20.0, 1.6);
+        u.add(a);
+        u.add(b);
+        let drift = u.bodies.iter().map(|b| b.vel * b.mass).sum::<DVec3>() / 80.0;
+        // Look the moment they break up (later smashes among the pieces shed more dust).
+        for _ in 0..120 {
+            u.update(1.0 / 60.0, 1.0, false);
+            if u.bodies.len() > 2 {
+                break;
+            }
+        }
+        assert!(u.bodies.len() > 2, "expected fragments, got {}", u.bodies.len());
+        // Some mass turns to dust, but the wreckage as a whole keeps moving as the pair did.
+        let mass: f64 = u.bodies.iter().map(|b| b.mass).sum();
+        let now = u.bodies.iter().map(|b| b.vel * b.mass).sum::<DVec3>() / mass;
+        assert!((now - drift).length() < 1e-6, "wreckage drifts at {now:?}, the pair was drifting at {drift:?}");
     }
 
     #[test]
