@@ -12,12 +12,14 @@ OUT="${1:-target/release/dist}"
 STAGE="$OUT/$NAME"
 
 # build.rs renders the icon into the newest OUT_DIR for this crate.
+# Cargo's build-dir layout varies by version (`build/<pkg>-<hash>/out` or
+# `build/<pkg>/<hash>/out`), so search for it and take the newest.
 ICON_DIR=""
-for d in target/release/build/$BIN-*/out; do
-    if [ -f "$d/AppIcon-256.png" ] && { [ -z "$ICON_DIR" ] || [ "$d/AppIcon-256.png" -nt "$ICON_DIR/AppIcon-256.png" ]; }; then
-        ICON_DIR="$d"
+while IFS= read -r f; do
+    if [ -z "$ICON_DIR" ] || [ "$f" -nt "$ICON_DIR/AppIcon-256.png" ]; then
+        ICON_DIR=$(dirname "$f")
     fi
-done
+done < <(find target/release/build -path "*$BIN*" -name AppIcon-256.png 2>/dev/null)
 [ -n "$ICON_DIR" ] || { echo "error: icon not found; run cargo build --release first" >&2; exit 1; }
 
 rm -rf "$STAGE"
