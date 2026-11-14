@@ -8,7 +8,7 @@ The project is fully vibe coded (the README says so). Every change is made by an
 
 ```sh
 cargo build --release          # always test and run release builds; debug is slow
-cargo test --release           # ~78 tests, ~30 s; CI runs `--locked`
+cargo test --release           # ~95 tests, ~15 s; CI runs `--locked`
 ./target/release/arthurs-universe-playground
 ```
 
@@ -45,6 +45,7 @@ $B --no-update-check --preset galaxy --speed 30 --zoom 1000 --frames 220 --hide-
 | `src/universe.rs` | N-body physics, collisions, particles, flashes, supernovae, `Sound` events |
 | `src/explore.rs` | Flying rockets (incl. easy flying) and walking on worlds |
 | `src/save.rs` | Save file format and the Saves window state |
+| `src/population.rs` | How many people live on each world: growth, moving away, settlers; `Universe::evacuate` when a world is destroyed |
 | `src/audio.rs` | Synthesized sound: `Mixer` (testable), `Audio` (cpal device), `SoundBridge` (game -> mixer) |
 | `src/settings.rs` | `Settings` with JSON load/save; `sanitize` clamps values |
 | `src/ui.rs`, `src/ui/hud.rs`, `src/ui/options.rs` | egui interface: bars, dock, tool cards, inspector, modals; flight/walk HUDs; Settings tabs |
@@ -70,13 +71,20 @@ $B --no-update-check --preset galaxy --speed 30 --zoom 1000 --frames 220 --hide-
 
 **Sound**: to add an effect, add a `Sound` variant (`universe.rs`), push it with `universe.sound(...)` where it happens, map it in `sfx_for` and give it a `recipe` in `audio.rs`. Listen without playing: `AUP_DEMO_WAV=demo.wav cargo test --release demo_wav -- --ignored`. Keep impacts deep rather than hissy, and music bells sparse and soft (the user found them annoying when frequent).
 
+**Physics** (`src/universe.rs`):
+- Particles can carry `mass` (rubble from a smash, a shredded world's stream; zero for decoration and galaxy stars). A body that swallows one gains its mass and momentum, so when a collision turns mass into dust, hand it over with `give_mass_to_newest` rather than dropping it. Collision tests check that mass and momentum add up, dust included.
+- A glancing hit goes through `graze` first: it works out which part of the smaller world is in the way (that part merges or shatters as usual) and which part sails past as a slowed "remnant" shedding pieces. Nothing is placed in orbit by hand; `name_new_moons` only labels a leftover that gravity has left circling. Whether a moon results depends on the hit and on chance (about half the time in the best case), so the Theia preset fixes its seed. When judging anything random like this, sweep many seeds, not one.
+- Work per frame is capped: `pair_budget` for bodies (tuned to the computer by `Game::tune_physics`, only when `physics_budget` is set, so tests and screenshot runs stay repeatable) and `PARTICLE_WORK` for particles. Check the cost of physics changes with many bodies at 100x, not just the presets at 1x.
+
+**People** (`src/population.rs`): `Body::population` follows the world's `conditions` verdict (Good: full room, Caution: bases only, Danger: none). Nobody is ever hurt: anything that destroys or tears a world must call `Universe::evacuate` first, and wording about people stays gentle (they "escape" or "leave", never die). New presets get their starting people from `population::settle`.
+
 **Tests**: `Game` runs headless (no GPU, no audio), so gameplay is tested by driving `Game` directly; see the `tests` modules in `game.rs`, `explore.rs`, `save.rs`, `audio.rs`. UI tests need `setup_style(&ctx)` first (fonts). Add a regression test with each bug fix and check it fails without the fix.
 
 ## Releasing
 
 The user rolls features into releases (1.2.2, 1.3.0, 1.3.1...). When asked to release:
 
-1. Split the work into **one commit per feature** for easy tracking (the user asked for this), each building and passing tests on its own. When files mix features, build each commit's version of them rather than committing everything at once.
+1. Group the work into **at most three commits** (the user asked for this on 2026-11-14, replacing the earlier one-commit-per-feature rule), each building and passing tests on its own: for example gameplay, graphics, then the release commit.
 2. Final commit: bump `version` in `Cargo.toml`, `cargo build` to update `Cargo.lock`, move the `[Unreleased]` notes in `CHANGELOG.md` under `## [x.y.z] - YYYY-MM-DD` and update the compare links. Message: `Arthur's Universe Playground x.y.z` with short `Added:` / `Changed:` / `Fixed:` lists.
 3. `git tag -a vx.y.z -m "Arthur's Universe Playground x.y.z"` and `git push origin main vx.y.z`. The tag triggers `release.yml`, which tests, packages the Windows .zip, macOS .dmg and Linux .tar.gz, and publishes the GitHub release with that CHANGELOG section as notes. Watch it with `gh run watch`.
 

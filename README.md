@@ -15,6 +15,7 @@ A space sandbox written in **Rust + Vulkan**. Start with the Solar System, then:
 - **Smash planets together.** Collisions use an impact-energy model: gentle hits merge (leaving craters and molten scars), harder ones shatter worlds into glowing fragments and debris that can re-accrete.
 - **Create your own universe.** Pick a centre (Sun-like star, red dwarf, blue giant, binary, black hole, nothing), the number of planets, moons, belts, rings, gravity strength and chaos.
 - **Fly rockets.** Pick one of six rockets, lift off from any solid world and fly under real gravity, with a chase camera or from the cockpit. Land gently, or crash spectacularly. Younger pilots can switch on **Easy flying** for endless fuel and landings that always work.
+- **Worlds with people.** Every solid world has a population that grows where conditions are just right, moves away when they turn bad, and sends settlers to empty worlds you make comfortable. Nobody is ever hurt: if a world is destroyed, its people escape in their rockets.
 - **Walk on worlds.** Stand on a planet, moon or asteroid, walk over its terrain and jump in its gravity. Climb out of a landed rocket and back in.
 - **Save your universes.** Save a universe you've built or painted and load it again later. The game also saves automatically when you close it, so you can carry on where you left off.
 - **Hear it.** Rumbling impacts, roaring rocket engines, footsteps, supernovae you feel in your chest, and calm space music. All of it is generated live by the game.
@@ -32,8 +33,8 @@ A space sandbox written in **Rust + Vulkan**. Start with the Solar System, then:
 | **Black hole:** lensing, a Doppler-beamed accretion disk and a photon ring | **Galaxy collision:** 68,000 stars, two cores and the tidal tails they fling out |
 | ![A rocket lifting off from Earth, with the flight panel below](docs/screenshots/flying.jpg) | ![Standing on Mars, with Phobos overhead and the conditions there](docs/screenshots/walking.jpg) |
 | **Flying:** lift off from any solid world under real gravity | **Walking:** stand on Mars and see what it's like there |
-| ![A blue supergiant's supernova blast wave](docs/screenshots/supernova.jpg) | ![Theia smashing into the young Earth, leaving it molten and surrounded by debris](docs/screenshots/planet-smash.jpg) |
-| **Supernova:** the blast wave, with a neutron star left behind | **Smash planets:** Theia hits the young Earth and shatters into glowing debris |
+| ![A blue supergiant's supernova blast wave](docs/screenshots/supernova.jpg) | ![The young Earth after Theia's glancing blow, with the newborn Moon in orbit](docs/screenshots/planet-smash.jpg) |
+| **Supernova:** the blast wave, with a neutron star left behind | **Smash planets:** Theia strikes the young Earth a glancing blow, and a piece left in orbit becomes the Moon |
 
 ## Download
 
@@ -53,7 +54,7 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 |---|---|
 | The Solar System | Sun, 8 planets plus Pluto, the Moon, Galilean moons, Titan, Triton, rings, asteroid belt |
 | Solar System vs Rogue Black Hole | A black hole plows through the Solar System |
-| Theia Impact | A Mars-sized world hits the proto-Earth |
+| Theia Impact | A Mars-sized world strikes the proto-Earth a glancing blow, and a piece left in orbit becomes the Moon |
 | Head-on Planet Smash | Two worlds collide head-on |
 | Binary Star System | Circumbinary planets around two suns |
 | Black Hole Feast | A supermassive black hole, a doomed star and planets |

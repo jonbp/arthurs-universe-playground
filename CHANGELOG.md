@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-14
+
+### Added
+
+- **Worlds have people.** Every world with solid ground now has a population, shown in a new People section when you select it, next to how many it has room for. People multiply where it is just right, a few live in bases where a spacesuit is needed, and they move away if you make a world too hot, cold or airless. Settlers set out from a busy world to any empty one that is just right, so try making Mars comfortable. You can also set the number yourself. The Solar System starts with 8 billion on Earth.
+- **Everyone always escapes.** If a world with people on it is smashed, swallowed or scorched, the event log tells you they got away in their rockets.
+- **Glancing blows.** A world that only clips another is now torn in two: the part in the way sinks in, and the rest carries on past, slowed, with pieces coming off it. What happens next is up to gravity. Hit too fast and the remnant flies away; come in slowly and it loops round and falls back; and sometimes a leftover piece stays in orbit and becomes a moon. Nothing puts it there.
+- **The Theia Impact makes the Moon.** Theia now drifts in slowly and strikes at about 45 degrees, as the real one did. It is torn apart, most of it falls into the young Earth, and a piece that is left circling becomes the Moon.
+- **Dust counts.** Rubble from a smash that rains back onto a world makes it a little heavier and bigger, and a black hole that shreds a world goes on to swallow the rest of it bit by bit.
+
+### Changed
+
+- **Deep space looks like deep space.** The background now has thousands of stars of every brightness and colour, the Milky Way crossing the sky with its dark lanes of dust, wisps of pink and blue gas, and a few far-off galaxies. It costs no more to draw than the old one.
+- **Crowded universes stay smooth.** The game now measures how fast your computer is and never lets the physics take more than a small part of each frame. With hundreds of bodies at high speed, time runs a little slower than asked instead of the picture stuttering; hover over the speed to see how fast it is really going.
+- Two worlds that have just brushed past each other and are moving apart no longer count as colliding again.
+- Fresh README screenshots.
+
 ## [1.3.2] - 2026-11-14
 
 ### Changed
@@ -128,7 +145,8 @@ First public release.
 - Ten presets, including Theia Impact, Black Hole Feast, Supernova Countdown and Galaxy Collision.
 - Downloadable builds for Windows (x64), macOS (Apple Silicon, MoltenVK bundled) and Linux (x86_64), all with the app icon.
 
-[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.3.2...HEAD
+[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.2...v1.3.0
