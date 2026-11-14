@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Arthur's Universe Playground
+Comment=A Vulkan-powered solar system sandbox
+Exec=arthurs-universe-playground
+Icon=arthurs-universe-playground
+Terminal=false
+Categories=Game;Simulation;Education;
+StartupWMClass=arthurs-universe-playground

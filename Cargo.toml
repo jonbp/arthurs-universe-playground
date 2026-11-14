@@ -1,0 +1,37 @@
+[package]
+name = "arthurs-universe-playground"
+version = "1.0.0"
+edition = "2024"
+description = "Arthur's Universe Playground - a Vulkan-powered solar system sandbox"
+
+[[bin]]
+name = "arthurs-universe-playground"
+path = "src/main.rs"
+
+[dependencies]
+ash = "0.38"
+ash-window = "0.13"
+raw-window-handle = "0.6"
+winit = "0.30"
+egui = "0.36"
+egui-winit = "0.36"
+egui-ash-renderer = "0.13"
+glam = { version = "0.34", features = ["bytemuck"] }
+bytemuck = { version = "1.25", features = ["derive"] }
+anyhow = "1.0.104"
+
+[build-dependencies]
+naga = { version = "30", features = ["wgsl-in", "spv-out"] }
+resvg = { version = "0.45", default-features = false }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
