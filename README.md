@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/AppIcon.svg" alt="Arthur's Universe Playground icon" width="160">
+</p>
+
 # 🌍 Arthur's Universe Playground
 
 A space sandbox written in **Rust + Vulkan**. Start with the Solar System, then:
@@ -55,6 +59,7 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 | `B` | Asteroid barrage at selection |
 | `Del` | Delete selection |
 | `T` / `L` / `H` | Trails / labels / hide UI |
+| `F11` | Fullscreen |
 
 Flying (Fly tool, then click a world or press **Launch**):
 
@@ -79,6 +84,17 @@ Walking (Walk tool, then click a rocky world):
 | `Esc` | Back to the sandbox |
 
 Time slows down automatically when you fly (0.2×) or walk (0.1×), because the worlds are small and everything happens fast; use `[` and `]` to speed up for long trips.
+
+## Settings
+
+The gear button in the top-right bar opens **Settings**. Changes apply straight away and are saved automatically.
+
+- **Display:** fullscreen (`F11`), VSync, and a frame-rate limit (30–240 FPS, or off).
+- **Resolution scale:** draw the 3D scene at 50–200% of the window resolution. Lower is faster on modest GPUs; above 100% supersamples for smoother edges. The interface always renders at full sharpness.
+- **Graphics:** planet detail (Low / Standard / High), exposure, glow, star brightness, gravitational lensing and orbit trails.
+- **Interface:** UI size (75–150%), labels, and the bodies / particles / FPS counter.
+
+Settings are stored in `%APPDATA%\Arthur's Universe Playground\settings.json` on Windows, `~/Library/Application Support/Arthur's Universe Playground/settings.json` on macOS, and `~/.config/arthurs-universe-playground/settings.json` on Linux. Set `AUP_SETTINGS` to use a different file.
 
 ## Updates
 

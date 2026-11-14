@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-14
+
+### Added
+
+- **Settings.** A new Settings panel (the gear in the top-right bar) with:
+  - **Display:** fullscreen, VSync on or off, and a frame-rate limit (30, 60, 120, 144 or 240 FPS).
+  - **Resolution scale** from 50% to 200%: draw the 3D scene at a lower resolution for speed on modest graphics cards, or above 100% for smoother edges. The interface stays sharp at any scale.
+  - **Graphics:** planet detail (Low, Standard, High), exposure, glow, stars, gravitational lensing and orbit trails. These replace the old Visuals pop-up.
+  - **Interface:** UI size (75% to 150%), labels, and the bodies / particles / FPS counter.
+  - Settings are saved automatically and restored the next time you start the game.
+- **Fullscreen mode**: press `F11`, or switch it on in Settings.
+
+### Fixed
+
+- Windows: the game no longer opens a command-prompt window alongside it. When started from a terminal, its output still appears in that terminal, and a startup error is shown in a message box instead of disappearing.
+
 ## [1.2.0] - 2026-11-14
 
 ### Added
@@ -60,7 +76,8 @@ First public release.
 - Ten presets, including Theia Impact, Black Hole Feast, Supernova Countdown and Galaxy Collision.
 - Downloadable builds for Windows (x64), macOS (Apple Silicon, MoltenVK bundled) and Linux (x86_64), all with the app icon.
 
-[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jonbp/arthurs-universe-playground/releases/tag/v1.0.0

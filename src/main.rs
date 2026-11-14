@@ -3,6 +3,11 @@
 //! Change planet surfaces, spawn new worlds on new orbits, smash planets
 //! together, and build your own universes with black holes and supernovae.
 
+// Release builds on Windows are GUI-subsystem programs, so no console window opens next
+// to the game. When started from a terminal we attach to that terminal's console instead
+// (see `attach_parent_console`), so `--help` and log output still show up there.
+#![cfg_attr(all(windows, not(debug_assertions), not(test)), windows_subsystem = "windows")]
+
 mod body;
 mod camera;
 mod conditions;
@@ -16,6 +21,7 @@ mod presets;
 mod renderer;
 mod rocket;
 mod scene;
+mod settings;
 mod terrain;
 mod ui;
 mod universe;
@@ -24,7 +30,7 @@ mod util;
 mod vkctx;
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use glam::Vec2;
@@ -33,11 +39,12 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::game::Game;
 use crate::renderer::Renderer;
 use crate::scene::SceneOptions;
+use crate::settings::Settings;
 use crate::vkctx::{log, VkContext};
 
 /// Developer / testing options from the command line.
@@ -125,7 +132,8 @@ fn parse_args() -> Options {
             }
             "--help" | "-h" => {
                 println!(
-                    "Arthur's Universe Playground\n\nDeveloper options:\n  --preset <solar|rogue|theia|headon|binary|blackhole|supernova|galaxy|disk|empty>\n  --focus <body name>   --zoom <distance>   --speed <x>\n  --supernova <star>   --smash <body>   --paint <body>   --blackhole <body>\n  --screenshot <file.bmp> --frames <n>   --hide-ui   --icons (show the icon set)\n  --click <x,y@frame>   inject a UI click (repeatable)\n  --fly <body>   --walk <body>   --rocket <0-5>   --cockpit   --hold <key,key>\n  --no-update-check   --assume-version <x.y.z>"
+                    "Arthur's Universe Playground\n\nDeveloper options:\n  --preset <solar|rogue|theia|headon|binary|blackhole|supernova|galaxy|disk|empty>\n  --focus <body name>   --zoom <distance>   --speed <x>\n  --supernova <star>   --smash <body>   --paint <body>   --blackhole <body>\n  --screenshot <file.bmp> --frames <n>   --hide-ui   --icons (show the icon set)\n  --click <x,y@frame>   inject a UI click (repeatable)\n  --fly <body>   --walk <body>   --rocket <0-5>   --cockpit   --hold <key,key>\n  --no-update-check   --assume-version <x.y.z>\n\nSettings are saved to {}  (override with AUP_SETTINGS)",
+                    settings::settings_path().map(|p| p.display().to_string()).unwrap_or_else(|| "(nowhere)".into())
                 );
                 std::process::exit(0);
             }
@@ -169,6 +177,14 @@ struct State {
     fps_timer: f64,
     fps_frames: u32,
     opts: Options,
+    /// Settings as last written to disk, and when they started to differ from the live ones.
+    saved_settings: Settings,
+    settings_dirty_since: Option<Instant>,
+    /// Whether settings are read from / written to the settings file (not for automated runs).
+    persist_settings: bool,
+    /// Fullscreen state we last asked the window for, and when.
+    fullscreen: bool,
+    fullscreen_changed: Instant,
 }
 
 /// Desktop app id (Wayland app_id / X11 WM_CLASS); matches the Linux .desktop file.
@@ -192,11 +208,16 @@ fn window_icon() -> Option<winit::window::Icon> {
 
 impl State {
     fn new(event_loop: &ActiveEventLoop, opts: Options) -> Result<State> {
+        // Screenshot runs are tests: they start from the defaults and never touch the user's
+        // file, unless pointed at a specific one with AUP_SETTINGS.
+        let persist_settings = opts.screenshot.is_none() || std::env::var_os("AUP_SETTINGS").is_some();
+        let settings = if persist_settings { Settings::load() } else { Settings::default() };
         let attrs = Window::default_attributes()
             .with_title("Arthur's Universe Playground")
             .with_inner_size(LogicalSize::new(1440.0, 900.0))
             .with_min_inner_size(LogicalSize::new(640.0, 400.0))
-            .with_window_icon(window_icon());
+            .with_window_icon(window_icon())
+            .with_fullscreen(settings.fullscreen.then_some(Fullscreen::Borderless(None)));
         #[cfg(all(unix, not(target_os = "macos")))]
         let attrs = {
             use winit::platform::wayland::WindowAttributesExtWayland;
@@ -207,9 +228,14 @@ impl State {
         let window = Arc::new(event_loop.create_window(attrs)?);
         let size = window.inner_size();
         let ctx = VkContext::new(window.as_ref())?;
-        let renderer = Renderer::new(ctx, size.width, size.height)?;
+        let mut renderer = Renderer::new(ctx, size.width, size.height)?;
+        renderer.set_vsync(settings.vsync);
+        renderer.set_render_scale(settings.render_scale);
         let egui_ctx = egui::Context::default();
         ui::setup_style(&egui_ctx);
+        // UI size is a setting; egui's own Ctrl +/- zoom would fight it (and '-' slows time).
+        egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        egui_ctx.set_zoom_factor(settings.ui_scale);
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -219,6 +245,7 @@ impl State {
             Some(4096),
         );
         let mut game = Game::new();
+        game.settings = settings.clone();
         if let Some(p) = opts.preset.as_deref().and_then(preset_from_name) {
             game.load_preset(p);
         }
@@ -294,6 +321,7 @@ impl State {
         if !opts.no_update_check && (opts.screenshot.is_none() || opts.assume_version.is_some()) && std::env::var_os("AUP_NO_UPDATE_CHECK").is_none() {
             game.updater = update::Updater::start(opts.assume_version.as_deref().unwrap_or(env!("CARGO_PKG_VERSION")));
         }
+        let game_fullscreen = game.settings.fullscreen;
         Ok(State {
             window,
             renderer,
@@ -307,10 +335,65 @@ impl State {
             fps_timer: 0.0,
             fps_frames: 0,
             opts,
+            saved_settings: settings,
+            settings_dirty_since: None,
+            persist_settings,
+            fullscreen: game_fullscreen,
+            fullscreen_changed: Instant::now(),
         })
     }
 
+    /// Push changed settings to the window, renderer and egui, and save them once they
+    /// have stopped changing for a moment (sliders change every frame while dragged).
+    fn apply_settings(&mut self) {
+        let s = &self.game.settings;
+        if s.fullscreen != self.fullscreen {
+            self.window.set_fullscreen(s.fullscreen.then_some(Fullscreen::Borderless(None)));
+            self.fullscreen = s.fullscreen;
+            self.fullscreen_changed = Instant::now();
+        }
+        self.renderer.set_vsync(s.vsync);
+        self.renderer.set_render_scale(s.render_scale);
+        if (self.egui_ctx.zoom_factor() - s.ui_scale).abs() > 1e-4 {
+            self.egui_ctx.set_zoom_factor(s.ui_scale);
+        }
+        if !self.persist_settings || *s == self.saved_settings {
+            self.settings_dirty_since = None;
+            return;
+        }
+        let since = *self.settings_dirty_since.get_or_insert_with(Instant::now);
+        if since.elapsed() > Duration::from_millis(600) {
+            self.save_settings();
+        }
+    }
+
+    fn save_settings(&mut self) {
+        if !self.persist_settings || self.game.settings == self.saved_settings {
+            return;
+        }
+        if let Err(e) = self.game.settings.save() {
+            log(&format!("Couldn't save settings: {e}"));
+        }
+        self.saved_settings = self.game.settings.clone();
+        self.settings_dirty_since = None;
+    }
+
+    /// Hold the frame rate down to the user's cap, if they set one.
+    fn limit_frame_rate(&self) {
+        let limit = self.game.settings.fps_limit;
+        if limit == 0 || self.opts.screenshot.is_some() {
+            return;
+        }
+        let min = Duration::from_secs_f64(1.0 / limit as f64);
+        let elapsed = self.last.elapsed();
+        if elapsed < min {
+            std::thread::sleep(min - elapsed);
+        }
+    }
+
     fn frame(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        self.apply_settings();
+        self.limit_frame_rate();
         let now = Instant::now();
         let dt = (now - self.last).as_secs_f64().min(0.1);
         self.last = now;
@@ -353,7 +436,8 @@ impl State {
         }
         let ppp = self.egui_ctx.pixels_per_point();
         let game = &mut self.game;
-        let output = self.egui_ctx.run_ui(raw, |ui| ui::draw(ui, game, &cam, ppp));
+        let scene_px = self.renderer.scene_extent();
+        let output = self.egui_ctx.run_ui(raw, |ui| ui::draw(ui, game, &cam, ppp, (scene_px.width, scene_px.height)));
         self.egui_state.handle_platform_output(&self.window, output.platform_output);
 
         let scene_has_pointer = !self.egui_ctx.egui_wants_pointer_input() && !self.egui_ctx.is_pointer_over_egui();
@@ -363,11 +447,12 @@ impl State {
         let cam = self.game.view_frame(w, h);
         self.game.scene_extras(&cam, &mut self.extras);
         let opts = SceneOptions {
-            trails: self.game.show_trails,
-            exposure: self.game.exposure,
-            bloom: self.game.bloom,
-            lensing: self.game.lensing,
-            stars: self.game.stars,
+            trails: self.game.settings.trails,
+            exposure: self.game.settings.exposure,
+            bloom: self.game.settings.bloom,
+            lensing: self.game.settings.lensing,
+            stars: self.game.settings.stars,
+            planet_detail: self.game.settings.planet_detail,
             selected: self.game.selected,
             hovered: self.game.hovered,
             time: self.game.real_time as f32,
@@ -469,8 +554,22 @@ impl ApplicationHandler for App {
             st.game.view_frame(e.width as f32, e.height as f32)
         };
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => st.renderer.needs_resize = true,
+            WindowEvent::CloseRequested => {
+                st.save_settings();
+                event_loop.exit();
+            }
+            WindowEvent::Resized(_) => {
+                st.renderer.needs_resize = true;
+                // Fullscreen can also be entered or left by the OS (macOS green button,
+                // window manager keys): keep the setting in step with the real window, but
+                // not while a change we asked for is still animating in.
+                let actual = st.window.fullscreen().is_some();
+                if actual != st.fullscreen && st.fullscreen_changed.elapsed() > Duration::from_secs(2) {
+                    st.fullscreen = actual;
+                    st.game.settings.fullscreen = actual;
+                }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => st.renderer.needs_resize = true,
             WindowEvent::RedrawRequested => {
                 if let Err(e) = st.frame(event_loop) {
                     self.error = Some(format!("{e:#}"));
@@ -521,6 +620,7 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::ArrowRight) => "right".to_string(),
                     Key::Named(NamedKey::Shift) => "shift".to_string(),
                     Key::Named(NamedKey::Control) => "ctrl".to_string(),
+                    Key::Named(NamedKey::F11) => "f11".to_string(),
                     Key::Character(c) => c.to_lowercase(),
                     _ => return,
                 };
@@ -546,7 +646,43 @@ impl ApplicationHandler for App {
     }
 }
 
+/// A GUI-subsystem program has no console of its own. If we were started from one
+/// (cmd, PowerShell, Windows Terminal), borrow it so printed output goes somewhere.
+#[cfg(all(windows, not(debug_assertions)))]
+fn attach_parent_console() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    // Fails harmlessly when launched from Explorer (there is no parent console).
+    unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+}
+
+/// Without a console a fatal error would vanish silently, so show it in a message box.
+#[cfg(windows)]
+fn error_dialog(message: &str) {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MessageBoxW(hwnd: *mut std::ffi::c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
+    }
+    const MB_OK_ICONERROR: u32 = 0x10;
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let (text, caption) = (wide(message), wide("Arthur's Universe Playground"));
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), MB_OK_ICONERROR) };
+}
+
 fn main() {
+    #[cfg(all(windows, not(debug_assertions)))]
+    attach_parent_console();
+    #[cfg(windows)]
+    {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            default_hook(info);
+            error_dialog(&format!("The game crashed:\n\n{info}"));
+        }));
+    }
     let opts = parse_args();
     let event_loop = EventLoop::new().expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -558,6 +694,8 @@ fn main() {
     app.state = None;
     if let Some(e) = app.error {
         eprintln!("Arthur's Universe Playground failed: {e}");
+        #[cfg(windows)]
+        error_dialog(&format!("Arthur's Universe Playground couldn't start or stopped unexpectedly.\n\n{e}"));
         std::process::exit(1);
     }
 }

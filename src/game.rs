@@ -8,6 +8,7 @@ use crate::explore::Mode;
 use crate::paint::Brush;
 use crate::presets::{self, CustomParams, Preset};
 use crate::scene::Polyline;
+use crate::settings::Settings;
 use crate::universe::Universe;
 use crate::update::Updater;
 
@@ -80,13 +81,10 @@ pub struct Game {
     pub spawn: SpawnSettings,
     pub brush: BrushSettings,
     pub smash: SmashSettings,
-    pub show_trails: bool,
-    pub show_labels: bool,
     pub show_ui: bool,
-    pub lensing: bool,
-    pub exposure: f32,
-    pub bloom: f32,
-    pub stars: f32,
+    /// Display, graphics and interface options (saved between runs by main.rs).
+    pub settings: Settings,
+    pub show_settings: bool,
     pub custom: CustomParams,
     pub show_custom: bool,
     pub show_help: bool,
@@ -142,13 +140,9 @@ impl Game {
             },
             brush: BrushSettings { brush: Brush::Raise, size: 0.25, strength: 0.6 },
             smash: SmashSettings { kind: BodyKind::Asteroid, size: 1.0, speed: 25.0 },
-            show_trails: true,
-            show_labels: true,
             show_ui: true,
-            lensing: true,
-            exposure: 1.0,
-            bloom: 0.6,
-            stars: 1.0,
+            settings: Settings::default(),
+            show_settings: false,
             custom: CustomParams::default(),
             show_custom: false,
             show_help: false,
@@ -757,8 +751,9 @@ impl Game {
             "=" | "+" | "]" => self.time_scale = (self.time_scale * 2.0).min(1000.0),
             "-" | "[" => self.time_scale = (self.time_scale / 2.0).max(0.01),
             "h" => self.show_ui = !self.show_ui,
-            "t" => self.show_trails = !self.show_trails,
-            "l" => self.show_labels = !self.show_labels,
+            "f11" => self.settings.fullscreen = !self.settings.fullscreen,
+            "t" => self.settings.trails = !self.settings.trails,
+            "l" => self.settings.labels = !self.settings.labels,
             "b" => {
                 if let Some(id) = self.selected {
                     self.barrage(id, 12);

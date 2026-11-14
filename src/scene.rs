@@ -6,6 +6,7 @@ use crate::body::BodyKind;
 use crate::camera::CameraFrame;
 use crate::explore::SceneExtras;
 use crate::gpu_types::*;
+use crate::settings::PlanetDetail;
 use crate::universe::{Universe, P_GLOW, P_HOT, P_IMMORTAL};
 
 pub struct SceneOptions {
@@ -14,6 +15,7 @@ pub struct SceneOptions {
     pub bloom: f32,
     pub lensing: bool,
     pub stars: f32,
+    pub planet_detail: PlanetDetail,
     pub selected: Option<u64>,
     pub hovered: Option<u64>,
     pub time: f32,
@@ -78,9 +80,15 @@ pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts:
             extra: [b.emissive(), b.flash.min(3.0) * if b.kind.is_luminous() { 0.0 } else { 1.0 }, highlight, 0.0],
         };
         // A world that more than fills the view (flying low, walking) gets the finest mesh.
-        if px > cam.size.y * 1.5 && bodies_ultra.len() < 2 {
+        // Thresholds are in pixels of screen radius.
+        let (ultra_px, hi_px, max_ultra) = match opts.planet_detail {
+            PlanetDetail::Low => (cam.size.y * 3.0, 160.0, 1),
+            PlanetDetail::Standard => (cam.size.y * 1.5, 50.0, 2),
+            PlanetDetail::High => (cam.size.y * 0.6, 16.0, 4),
+        };
+        if px > ultra_px && bodies_ultra.len() < max_ultra {
             bodies_ultra.push(g);
-        } else if px > 50.0 {
+        } else if px > hi_px {
             bodies_hi.push(g);
         } else {
             bodies_lo.push(g);

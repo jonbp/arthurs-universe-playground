@@ -3,8 +3,8 @@
 //!
 //! Layout:
 //! ```text
-//!  [universe ▾]            [« ▶ » 10× ⏱]            [trails labels lens | ☀ ⚙ ? ⊘]
-//!  [tool ]  [tool options]                                       [inspector]
+//!  [universe ▾]            [« ▶ » 10× ⏱]          [trails labels lens | ⚙ ⚛ ? ⊘]
+//!  [tool ]  [tool options]                              [inspector / settings]
 //!  [dock ]
 //!  [toasts]                  [ hint ]                                [stats]
 //! ```
@@ -24,6 +24,7 @@ use crate::presets::{CenterKind, Preset};
 use crate::universe::CollisionMode;
 
 mod hud;
+mod options;
 
 // ── Theme ───────────────────────────────────────────────────────────────────
 
@@ -552,7 +553,8 @@ fn fmt_count(n: usize) -> String {
 // ── Top level ──────────────────────────────────────────────────────────────
 
 /// Draw the whole UI. `ppp` = pixels per point, used to convert camera pixels to egui points.
-pub fn draw(root: &mut Ui, game: &mut Game, cam: &CameraFrame, ppp: f32) {
+/// `scene_px` = the size the 3D scene is drawn at (window size times the render scale).
+pub fn draw(root: &mut Ui, game: &mut Game, cam: &CameraFrame, ppp: f32, scene_px: (u32, u32)) {
     let ctx = root.ctx().clone();
     draw_labels(&ctx, game, cam, ppp);
     hud::scene_overlay(&ctx, game, cam, ppp);
@@ -574,7 +576,12 @@ pub fn draw(root: &mut Ui, game: &mut Game, cam: &CameraFrame, ppp: f32) {
         tool_dock(&ctx, game);
         hint_bar(&ctx, game);
     }
-    inspector(&ctx, game);
+    if game.show_settings {
+        // Both live on the right-hand side; the inspector comes back when settings close.
+        options::settings_panel(&ctx, game, cam, scene_px);
+    } else {
+        inspector(&ctx, game);
+    }
     event_log(&ctx, game);
     stats_bar(&ctx, game);
     hud::update_banner(&ctx, game);
@@ -747,27 +754,22 @@ fn view_bar(ctx: &egui::Context, game: &mut Game) {
     floating(ctx, "bar_view", Align2::RIGHT_TOP, vec2(-EDGE, EDGE), glass(6), |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            if icon_button(ui, Icon::Orbit, 36.0, Look::Toggle(game.show_trails)).on_hover_text("Orbit trails  (T)").clicked() {
-                game.show_trails = !game.show_trails;
+            if icon_button(ui, Icon::Orbit, 36.0, Look::Toggle(game.settings.trails)).on_hover_text("Orbit trails  (T)").clicked() {
+                game.settings.trails = !game.settings.trails;
             }
-            if icon_button(ui, Icon::Tag, 36.0, Look::Toggle(game.show_labels)).on_hover_text("Labels  (L)").clicked() {
-                game.show_labels = !game.show_labels;
+            if icon_button(ui, Icon::Tag, 36.0, Look::Toggle(game.settings.labels)).on_hover_text("Labels  (L)").clicked() {
+                game.settings.labels = !game.settings.labels;
             }
-            if icon_button(ui, Icon::Lens, 36.0, Look::Toggle(game.lensing)).on_hover_text("Gravitational lensing").clicked() {
-                game.lensing = !game.lensing;
+            if icon_button(ui, Icon::Lens, 36.0, Look::Toggle(game.settings.lensing)).on_hover_text("Gravitational lensing").clicked() {
+                game.settings.lensing = !game.settings.lensing;
             }
             ui.add_space(2.0);
             divider(ui);
             ui.add_space(2.0);
 
-            let visuals = icon_button(ui, Icon::Sun, 36.0, Look::Plain).on_hover_text("Visuals");
-            settings_popup(&visuals).show(|ui| {
-                ui.set_width(POPUP_W);
-                card_header(ui, Icon::Sun, "Visuals", Some("How the universe is drawn"), false);
-                slider_row(ui, "Exposure", egui::Slider::new(&mut game.exposure, 0.2..=4.0).logarithmic(true));
-                slider_row(ui, "Glow", egui::Slider::new(&mut game.bloom, 0.0..=2.0));
-                slider_row(ui, "Stars", egui::Slider::new(&mut game.stars, 0.0..=2.0));
-            });
+            if icon_button(ui, Icon::Gear, 36.0, Look::Toggle(game.show_settings)).on_hover_text("Settings: display, graphics, interface").clicked() {
+                game.show_settings = !game.show_settings;
+            }
 
             let physics = icon_button(ui, Icon::Atom, 36.0, Look::Plain).on_hover_text("Physics settings");
             settings_popup(&physics).show(|ui| {
@@ -1492,6 +1494,9 @@ fn hint_bar(ctx: &egui::Context, game: &mut Game) {
 }
 
 fn stats_bar(ctx: &egui::Context, game: &Game) {
+    if !game.settings.show_stats {
+        return;
+    }
     // Not enough room beside the flight / walking panel on narrow windows.
     if game.exploring() && ctx.content_rect().width() < 1150.0 {
         return;
@@ -1623,6 +1628,7 @@ fn help_modal(ctx: &egui::Context, game: &mut Game) {
             (&["B"], "Asteroid barrage at the selection"),
             (&["T", "L"], "Toggle trails / labels"),
             (&["H"], "Hide the interface"),
+            (&["F11"], "Fullscreen"),
             (&["Esc"], "Deselect and stop following"),
         ]);
         section(ui, "Ideas");
@@ -1678,7 +1684,7 @@ fn draw_labels(ctx: &egui::Context, game: &Game, cam: &CameraFrame, ppp: f32) {
         } else if hovered {
             painter.circle_stroke(p, r + 5.0, Stroke::new(1.0, with_alpha(INFO, 200)));
         }
-        if !game.show_labels || b.name.is_empty() {
+        if !game.settings.labels || b.name.is_empty() {
             continue;
         }
         // Tiny distant planets get a marker so you can find them.

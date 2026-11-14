@@ -780,7 +780,7 @@ impl Game {
     /// Predicted path of the rocket around the world it is nearest to.
     fn update_flight_path(&mut self) {
         let Mode::Flight(f) = &self.mode else { return };
-        if !matches!(f.state, FlightState::Flying) || !self.show_trails {
+        if !matches!(f.state, FlightState::Flying) || !self.settings.trails {
             return;
         }
         let u = &self.universe;

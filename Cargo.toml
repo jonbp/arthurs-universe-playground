@@ -1,6 +1,6 @@
 [package]
 name = "arthurs-universe-playground"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2024"
 description = "Arthur's Universe Playground - a Vulkan-powered solar system sandbox"
 

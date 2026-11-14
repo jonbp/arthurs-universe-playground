@@ -310,7 +310,18 @@ pub struct Swapchain {
 }
 
 impl Swapchain {
-    pub fn new(ctx: &VkContext, width: u32, height: u32, old: vk::SwapchainKHR) -> Result<Swapchain> {
+    /// `vsync` = wait for the display (FIFO); otherwise the lowest-latency mode the
+    /// driver offers (mailbox, then immediate), falling back to FIFO which is always there.
+    pub fn new(ctx: &VkContext, width: u32, height: u32, vsync: bool, old: vk::SwapchainKHR) -> Result<Swapchain> {
+        let modes = unsafe { ctx.surface_fn.get_physical_device_surface_present_modes(ctx.pdevice, ctx.surface)? };
+        let present_mode = if vsync {
+            vk::PresentModeKHR::FIFO
+        } else {
+            [vk::PresentModeKHR::MAILBOX, vk::PresentModeKHR::IMMEDIATE]
+                .into_iter()
+                .find(|m| modes.contains(m))
+                .unwrap_or(vk::PresentModeKHR::FIFO)
+        };
         let caps = unsafe { ctx.surface_fn.get_physical_device_surface_capabilities(ctx.pdevice, ctx.surface)? };
         let formats = unsafe { ctx.surface_fn.get_physical_device_surface_formats(ctx.pdevice, ctx.surface)? };
         let format = formats
@@ -347,7 +358,7 @@ impl Swapchain {
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(caps.current_transform)
             .composite_alpha(alpha)
-            .present_mode(vk::PresentModeKHR::FIFO)
+            .present_mode(present_mode)
             .clipped(true)
             .old_swapchain(old);
         let swapchain = unsafe { ctx.swapchain_fn.create_swapchain(&info, None)? };

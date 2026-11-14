@@ -51,6 +51,8 @@ struct Targets {
     hdr_attachment_view: vk::ImageView,
     depth: Image,
     scene_fb: vk::Framebuffer,
+    /// Size of the HDR scene targets: the swapchain size times the render scale.
+    scene_extent: vk::Extent2D,
     final_fbs: Vec<vk::Framebuffer>,
 }
 
@@ -85,6 +87,10 @@ pub struct Renderer {
     hdr_sampler: vk::Sampler,
     pub egui: Option<egui_ash_renderer::Renderer<egui_ash_renderer::allocator::DefaultAllocator>>,
     pub needs_resize: bool,
+    /// The scene is drawn at this fraction of the window size (see `set_render_scale`).
+    render_scale: f32,
+    vsync: bool,
+    max_dim: u32,
     /// Set to request a screenshot of the next frame (BGRA8 pixels end up in `captured`).
     pub capture: bool,
     pub captured: Option<(u32, u32, Vec<u8>)>,
@@ -181,7 +187,8 @@ fn make_pipeline(device: &ash::Device, d: &PipeDesc) -> Result<vk::Pipeline> {
 impl Renderer {
     pub fn new(ctx: VkContext, width: u32, height: u32) -> Result<Renderer> {
         let device = ctx.device.clone();
-        let swapchain = Swapchain::new(&ctx, width, height, vk::SwapchainKHR::null())?;
+        let swapchain = Swapchain::new(&ctx, width, height, true, vk::SwapchainKHR::null())?;
+        let max_dim = unsafe { ctx.instance.get_physical_device_properties(ctx.pdevice) }.limits.max_image_dimension2_d.max(1024);
 
         let cmd_pool = unsafe {
             device.create_command_pool(
@@ -465,7 +472,7 @@ impl Renderer {
         ];
         let desc_pool = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(2 * n).pool_sizes(&sizes), None)? };
 
-        let targets = Self::create_targets(&ctx, &swapchain, scene_pass, final_pass)?;
+        let targets = Self::create_targets(&ctx, &swapchain, 1.0, max_dim, scene_pass, final_pass)?;
 
         let mut frames = Vec::new();
         for _ in 0..FRAMES_IN_FLIGHT {
@@ -544,6 +551,9 @@ impl Renderer {
             hdr_sampler,
             egui: Some(egui),
             needs_resize: false,
+            render_scale: 1.0,
+            vsync: true,
+            max_dim,
             capture: false,
             captured: None,
             capture_buf: None,
@@ -552,8 +562,10 @@ impl Renderer {
         Ok(r)
     }
 
-    fn create_targets(ctx: &VkContext, sc: &Swapchain, scene_pass: vk::RenderPass, final_pass: vk::RenderPass) -> Result<Targets> {
-        let (w, h) = (sc.extent.width.max(1), sc.extent.height.max(1));
+    fn create_targets(ctx: &VkContext, sc: &Swapchain, scale: f32, max_dim: u32, scene_pass: vk::RenderPass, final_pass: vk::RenderPass) -> Result<Targets> {
+        let (sw, sh) = (sc.extent.width.max(1), sc.extent.height.max(1));
+        let scaled = |v: u32| ((v as f32 * scale).round() as u32).clamp(1, max_dim);
+        let (w, h) = (scaled(sw), scaled(sh));
         let mips = (32 - w.max(h).leading_zeros()).min(8);
         let hdr = ctx.create_image(
             w,
@@ -577,12 +589,12 @@ impl Renderer {
             .iter()
             .map(|v| unsafe {
                 ctx.device.create_framebuffer(
-                    &vk::FramebufferCreateInfo::default().render_pass(final_pass).attachments(&[*v]).width(w).height(h).layers(1),
+                    &vk::FramebufferCreateInfo::default().render_pass(final_pass).attachments(&[*v]).width(sw).height(sh).layers(1),
                     None,
                 )
             })
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(Targets { hdr, hdr_attachment_view, depth, scene_fb, final_fbs })
+        Ok(Targets { hdr, hdr_attachment_view, depth, scene_fb, scene_extent: vk::Extent2D { width: w, height: h }, final_fbs })
     }
 
     fn destroy_targets(&self) {
@@ -636,10 +648,10 @@ impl Renderer {
         unsafe { self.ctx.device.device_wait_idle()? };
         self.destroy_targets();
         let old = self.swapchain.swapchain;
-        let new = Swapchain::new(&self.ctx, width, height, old)?;
+        let new = Swapchain::new(&self.ctx, width, height, self.vsync, old)?;
         self.swapchain.destroy(&self.ctx);
         self.swapchain = new;
-        self.targets = Self::create_targets(&self.ctx, &self.swapchain, self.scene_pass, self.final_pass)?;
+        self.targets = Self::create_targets(&self.ctx, &self.swapchain, self.render_scale, self.max_dim, self.scene_pass, self.final_pass)?;
         unsafe {
             for s in &self.render_finished {
                 self.ctx.device.destroy_semaphore(*s, None);
@@ -655,6 +667,27 @@ impl Renderer {
 
     pub fn extent(&self) -> vk::Extent2D {
         self.swapchain.extent
+    }
+
+    /// Size the 3D scene is actually drawn at (the window size times the render scale).
+    pub fn scene_extent(&self) -> vk::Extent2D {
+        self.targets.scene_extent
+    }
+
+    /// Draw the scene at `scale` times the window resolution (takes effect on the next frame).
+    pub fn set_render_scale(&mut self, scale: f32) {
+        if (scale - self.render_scale).abs() > 1e-4 {
+            self.render_scale = scale;
+            self.needs_resize = true;
+        }
+    }
+
+    /// Switch vertical sync on or off (recreates the swapchain on the next frame).
+    pub fn set_vsync(&mut self, vsync: bool) {
+        if vsync != self.vsync {
+            self.vsync = vsync;
+            self.needs_resize = true;
+        }
     }
 
     /// Render one frame. Returns Ok(false) if the swapchain must be recreated.
@@ -699,7 +732,13 @@ impl Renderer {
         let f = &self.frames[fi];
 
         // ---- upload frame data ----
-        f.globals.write(std::slice::from_ref(&frame.globals));
+        // Pixel-size maths in the shaders (minimum particle / star size) works in scene pixels,
+        // which differ from window pixels when the render scale isn't 1.
+        let scene_extent = self.targets.scene_extent;
+        let mut globals = frame.globals;
+        globals.screen[0] = scene_extent.width as f32;
+        globals.screen[1] = scene_extent.height as f32;
+        f.globals.write(std::slice::from_ref(&globals));
         let n_bodies = f.bodies.write(&frame.bodies[..frame.bodies.len().min(MAX_BODIES)]) as u32;
         let n_rings = f.rings.write(&frame.rings[..frame.rings.len().min(MAX_RINGS)]) as u32;
         let n_particles = f.particles.write(&frame.particles[..frame.particles.len().min(MAX_PARTICLES)]) as u32;
@@ -789,15 +828,16 @@ impl Renderer {
                 vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] } },
                 vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 0.0, stencil: 0 } },
             ];
-            let rect = vk::Rect2D { offset: vk::Offset2D::default(), extent };
+            let scene_rect = vk::Rect2D { offset: vk::Offset2D::default(), extent: scene_extent };
             device.cmd_begin_render_pass(
                 cmd,
-                &vk::RenderPassBeginInfo::default().render_pass(self.scene_pass).framebuffer(self.targets.scene_fb).render_area(rect).clear_values(&clears),
+                &vk::RenderPassBeginInfo::default().render_pass(self.scene_pass).framebuffer(self.targets.scene_fb).render_area(scene_rect).clear_values(&clears),
                 vk::SubpassContents::INLINE,
             );
-            let viewport = vk::Viewport { x: 0.0, y: 0.0, width: extent.width as f32, height: extent.height as f32, min_depth: 0.0, max_depth: 1.0 };
-            device.cmd_set_viewport(cmd, 0, &[viewport]);
-            device.cmd_set_scissor(cmd, 0, &[rect]);
+            let scene_viewport =
+                vk::Viewport { x: 0.0, y: 0.0, width: scene_extent.width as f32, height: scene_extent.height as f32, min_depth: 0.0, max_depth: 1.0 };
+            device.cmd_set_viewport(cmd, 0, &[scene_viewport]);
+            device.cmd_set_scissor(cmd, 0, &[scene_rect]);
             device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.scene_layout, 0, &[f.scene_set], &[]);
 
             if n_bodies > 0 {
@@ -892,6 +932,8 @@ impl Renderer {
             device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[b]);
 
             // ---- composite + UI ----
+            let rect = vk::Rect2D { offset: vk::Offset2D::default(), extent };
+            let viewport = vk::Viewport { x: 0.0, y: 0.0, width: extent.width as f32, height: extent.height as f32, min_depth: 0.0, max_depth: 1.0 };
             let clears = [vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] } }];
             device.cmd_begin_render_pass(
                 cmd,
