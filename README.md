@@ -91,7 +91,7 @@ Time slows down automatically when you fly (0.2×) or walk (0.1×), because the 
 
 ## Settings
 
-The gear button in the top-right bar opens **Settings**. Changes apply straight away and are saved automatically.
+The gear button in the top-right bar opens **Settings**, with a tab for each group below. Changes apply straight away and are saved automatically.
 
 - **Display:** fullscreen (`F11`), VSync, and a frame-rate limit (30–240 FPS, or off).
 - **Sound:** mute (`M`, or the speaker button), overall volume, effects and music.

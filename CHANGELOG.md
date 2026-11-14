@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Settings are split into tabs with icons: Display, Graphics, Sound, Interface and Gameplay, so the panel no longer scrolls on and on.
 - Linux builds need the ALSA development headers (`libasound2-dev`), and the game uses `libasound2` at run time for sound.
 
 ## [1.2.2] - 2026-11-14

@@ -90,10 +90,11 @@ pub enum Icon {
     Speaker,
     SpeakerOff,
     Music,
+    Monitor,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 74] = [
+    pub const ALL: [Icon; 75] = [
         Icon::Cursor,
         Icon::SpawnPlanet,
         Icon::Brush,
@@ -168,6 +169,7 @@ impl Icon {
         Icon::Speaker,
         Icon::SpeakerOff,
         Icon::Music,
+        Icon::Monitor,
     ];
 
     pub fn name(self) -> String {
@@ -844,6 +846,11 @@ fn draw(icon: Icon, p: &Pen) {
             p.line(&[(9.0, 9.5), (20.0, 7.5)]);
             p.circle((6.5, 17.5), 2.5);
             p.circle((17.5, 15.5), 2.5);
+        }
+        Monitor => {
+            p.closed(&[(3.0, 4.5), (21.0, 4.5), (21.0, 16.0), (3.0, 16.0)]);
+            p.line(&[(12.0, 16.0), (12.0, 20.0)]);
+            p.line(&[(8.0, 20.0), (16.0, 20.0)]);
         }
     }
 }
