@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-15
+
 ### Changed
 
 - **Everything is its real size.** The Solar System is now built to scale from NASA's figures: the Sun is 109 Earths wide and 150 million km away, Jupiter is 11 Earths wide, and every planet and moon has its real mass, its real slightly oval and tilted orbit, its real day and its real tilt. The planets start where they really were on 1 January 2000. A year takes a year, a month a month: at the starting speed of a week a second the Earth goes round the Sun in 52 seconds and Neptune takes two and a half hours.
@@ -162,7 +164,8 @@ First public release.
 - Ten presets, including Theia Impact, Black Hole Feast, Supernova Countdown and Galaxy Collision.
 - Downloadable builds for Windows (x64), macOS (Apple Silicon, MoltenVK bundled) and Linux (x86_64), all with the app icon.
 
-[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/jonbp/arthurs-universe-playground/compare/v1.3.0...v1.3.1
