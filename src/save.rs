@@ -165,12 +165,13 @@ fn body_json(b: &Body) -> Value {
 
 /// Rebuild a body. Missing or malformed fields fall back to that kind's defaults, so
 /// files from later versions with extra fields still load.
-fn body_from(v: &Value, rng: &mut crate::util::Rng) -> Option<(Body, Option<u32>)> {
+fn body_from(v: &Value, real: bool, rng: &mut crate::util::Rng) -> Option<(Body, Option<u32>)> {
     let kind = kind_from(v.get("kind")?.as_str()?)?;
     let id = v.get("id")?.as_u64()?;
     let name = v.get("name").and_then(Value::as_str).unwrap_or("");
-    let mut b = Body::new(id, name, kind, dvec(v, "pos")?, dvec(v, "vel").unwrap_or(DVec3::ZERO), rng);
-    b.mass = f64_or(v, "mass", b.mass).max(1e-6);
+    let mut b = Body::new(id, name, kind, dvec(v, "pos")?, dvec(v, "vel").unwrap_or(DVec3::ZERO), real, rng);
+    // (Tiny, but not nothing: to scale, Deimos has a hundred-millionth of the Earth's mass.)
+    b.mass = f64_or(v, "mass", b.mass).max(1e-12);
     b.radius = f64_or(v, "radius", b.radius).max(1e-6);
     if let Some(s) = v.get("surface") {
         let d = b.surface.clone();
@@ -321,6 +322,7 @@ impl Game {
             "body_count": bodies.len(),
             "universe": {
                 "time": u.time,
+                "real_scale": u.real_scale,
                 "g": u.g,
                 "collisions": collisions_key(u.collisions),
                 "tidal_disruption": u.tidal_disruption,
@@ -372,9 +374,12 @@ impl Game {
         }
         let particles = read_particles(&mut r, crate::renderer::MAX_PARTICLES)?;
         let mut rng = crate::util::Rng::new(now());
+        let uv = header.get("universe").cloned().unwrap_or(Value::Null);
+        // Saves from before universes were built to scale are models.
+        let real = uv.get("real_scale").and_then(Value::as_bool).unwrap_or(false);
         let mut bodies = Vec::new();
         for v in header.get("bodies").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]) {
-            if let Some(b) = body_from(v, &mut rng) {
+            if let Some(b) = body_from(v, real, &mut rng) {
                 bodies.push(b);
             }
         }
@@ -383,7 +388,7 @@ impl Game {
         let name = header.get("name").and_then(Value::as_str).unwrap_or("Saved universe").to_string();
         let u = &mut self.universe;
         u.reset(&name);
-        let uv = header.get("universe").cloned().unwrap_or(Value::Null);
+        u.real_scale = real;
         u.time = f64_or(&uv, "time", 0.0);
         u.g = f64_or(&uv, "g", 1.0).clamp(0.01, 10.0);
         u.collisions = uv.get("collisions").and_then(Value::as_str).and_then(collisions_from).unwrap_or(CollisionMode::Realistic);
@@ -404,9 +409,10 @@ impl Game {
         u.sync_next_id();
         u.particles = particles;
         u.event(format!("Loaded {name}"));
+        self.fit_tools_to_scale();
 
         let gv = header.get("game").cloned().unwrap_or(Value::Null);
-        self.time_scale = f64_or(&gv, "time_scale", 1.0).clamp(0.01, 1000.0);
+        self.time_scale = f64_or(&gv, "time_scale", 1.0).clamp(crate::game::MIN_TIME_SCALE, self.max_time_scale());
         self.paused = gv.get("paused").and_then(Value::as_bool).unwrap_or(false);
         self.selected = gv.get("selected").and_then(Value::as_u64).filter(|id| self.universe.get(*id).is_some());
         self.hovered = None;
@@ -415,7 +421,7 @@ impl Game {
         c.target = dvec(&cv, "target").unwrap_or(DVec3::ZERO);
         c.yaw = f64_or(&cv, "yaw", 0.0);
         c.pitch = f64_or(&cv, "pitch", 0.5).clamp(-1.55, 1.55);
-        c.desired_distance = f64_or(&cv, "distance", 300.0).clamp(0.01, 1e6);
+        c.desired_distance = f64_or(&cv, "distance", 300.0).clamp(0.01, crate::camera::MAX_DISTANCE);
         c.distance = c.desired_distance;
         c.follow = cv.get("follow").and_then(Value::as_u64).filter(|id| self.universe.get(*id).is_some());
         Ok(())

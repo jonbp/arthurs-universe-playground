@@ -13,13 +13,15 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -
     let center = p.pos_size.xyz;
     var size = p.pos_size.w;
     var color = p.color.rgb;
-    // Keep tiny far-away particles at >= ~1.5px, conserving their energy.
+    // Keep tiny far-away particles at >= ~1.5px, dimmed to conserve their energy,
+    // but never so dim that they vanish: at the true scale of a solar system an
+    // asteroid belt or a cloud of rubble is far smaller than a pixel.
     let depth = max(dot(center, g.cam_fwd.xyz), 0.001);
     let px = depth * 2.0 * g.cam_fwd.w / g.screen.y;
     let min_size = px * 1.5;
     if (size < min_size) {
         let k = size / min_size;
-        color = color * k * k;
+        color = color * max(k * k, 0.1);
         size = min_size;
     }
     let world = center + (g.cam_right.xyz * c.x + g.cam_up.xyz * c.y) * size;

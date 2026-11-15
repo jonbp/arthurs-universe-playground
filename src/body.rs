@@ -66,32 +66,61 @@ impl BodyKind {
         !self.is_stellar()
     }
 
-    /// Default visual + physical parameters for a freshly spawned body of this kind.
-    pub fn defaults(self) -> (f64, f64) {
-        // (mass, radius)
+    /// Mass and radius of a freshly spawned body of this kind. In a universe built to
+    /// scale these are real ones (the Sun, Jupiter, Neptune, Mars, Venus...); in a model
+    /// universe they are the squeezed ones the models were built with.
+    pub fn defaults(self, real: bool) -> (f64, f64) {
+        use crate::units::{self, mass, km};
+        if !real {
+            return match self {
+                BodyKind::Star => (10000.0, 10.0),
+                BodyKind::Rocky => (3.0, 1.0),
+                BodyKind::Earthlike => (40.0, 2.0),
+                BodyKind::Desert => (5.0, 1.4),
+                BodyKind::Cloudy => (30.0, 1.9),
+                BodyKind::GasGiant => (250.0, 6.0),
+                BodyKind::IceGiant => (40.0, 3.5),
+                BodyKind::Lava => (20.0, 1.6),
+                BodyKind::Ice => (6.0, 1.2),
+                BodyKind::Asteroid => (0.5, 0.5),
+                BodyKind::NeutronStar => (4000.0, 0.7),
+                BodyKind::BlackHole => (20000.0, 6.0),
+            };
+        }
         match self {
-            BodyKind::Star => (10000.0, 10.0),
+            BodyKind::Star => (units::SUN_MASS, units::SUN_RADIUS),
             BodyKind::Rocky => (3.0, 1.0),
-            BodyKind::Earthlike => (40.0, 2.0),
-            BodyKind::Desert => (5.0, 1.4),
-            BodyKind::Cloudy => (30.0, 1.9),
-            BodyKind::GasGiant => (250.0, 6.0),
-            BodyKind::IceGiant => (40.0, 3.5),
+            BodyKind::Earthlike => (units::EARTH_MASS, units::EARTH_RADIUS),
+            BodyKind::Desert => (mass(42_828.37), km(3389.5)),
+            BodyKind::Cloudy => (mass(324_858.59), km(6051.8)),
+            BodyKind::GasGiant => (units::JUPITER_MASS, km(69_911.0)),
+            BodyKind::IceGiant => (mass(6_835_099.5), km(24_622.0)),
             BodyKind::Lava => (20.0, 1.6),
             BodyKind::Ice => (6.0, 1.2),
             BodyKind::Asteroid => (0.5, 0.5),
-            BodyKind::NeutronStar => (4000.0, 0.7),
-            BodyKind::BlackHole => (20000.0, 6.0),
+            // A real neutron star is only about 20 km across: far too small to see or
+            // to fly to, so (like small black holes) it is drawn much bigger than life.
+            BodyKind::NeutronStar => (1.4 * units::SUN_MASS, 0.7),
+            BodyKind::BlackHole => (10.0 * units::SUN_MASS, MIN_BLACK_HOLE_RADIUS),
         }
     }
 }
 
+/// The smallest a black hole is ever drawn. A real one with the mass of a few Suns
+/// would be a few kilometres across and impossible to find.
+const MIN_BLACK_HOLE_RADIUS: f64 = 0.6;
+
 /// Event-horizon radius as a function of mass (game units).
-pub fn black_hole_radius(mass: f64) -> f64 {
+pub fn black_hole_radius(mass: f64, real: bool) -> f64 {
+    if real {
+        // The real thing: 2GM/c². About 3 km for each Sun of mass, so only a
+        // giant black hole (millions of Suns) is bigger than the minimum.
+        return (2.0 * mass / (crate::units::LIGHT_SPEED * crate::units::LIGHT_SPEED)).max(MIN_BLACK_HOLE_RADIUS);
+    }
     // Linear (like a Schwarzschild radius) up to stellar-ish masses, then
     // sub-linear so very heavy holes don't swallow whole planetary systems visually.
     if mass <= 30_000.0 {
-        (mass * 3.0e-4).max(0.6)
+        (mass * 3.0e-4).max(MIN_BLACK_HOLE_RADIUS)
     } else {
         9.0 * (mass / 30_000.0).sqrt()
     }
@@ -242,10 +271,10 @@ pub struct Body {
 }
 
 impl Body {
-    pub fn new(id: u64, name: impl Into<String>, kind: BodyKind, pos: DVec3, vel: DVec3, rng: &mut Rng) -> Body {
-        let (mass, mut radius) = kind.defaults();
+    pub fn new(id: u64, name: impl Into<String>, kind: BodyKind, pos: DVec3, vel: DVec3, real: bool, rng: &mut Rng) -> Body {
+        let (mass, mut radius) = kind.defaults(real);
         if kind == BodyKind::BlackHole {
-            radius = black_hole_radius(mass);
+            radius = black_hole_radius(mass, real);
         }
         Body {
             id,
@@ -309,13 +338,22 @@ impl Body {
         Quat::from_rotation_z(self.tilt) * Vec3::Y
     }
 
-    /// Light output (relative to the Sun ~ 1.0)
-    pub fn luminosity(&self) -> f32 {
+    /// How strongly it lights the worlds around it. The shaders dim light with
+    /// distance (80 / distance), not distance squared, so that the outer planets can
+    /// still be seen: in a universe built to scale this is the square root of the real
+    /// brightness, set so the Earth is lit as it always was.
+    pub fn luminosity(&self, real: bool) -> f32 {
         match self.kind {
+            BodyKind::Star if real => {
+                let t = (self.temperature / crate::units::SUN_TEMPERATURE) as f64;
+                let r = self.radius / crate::units::SUN_RADIUS;
+                let power = (r * r * t * t * t * t).clamp(1e-4, 1e7);
+                (1.56 * crate::units::AU / 80.0 * power.sqrt()) as f32 * (1.0 + self.flash * 6.0)
+            }
             BodyKind::Star => {
                 let t = self.temperature / 5800.0;
                 let r = (self.radius / 12.0) as f32;
-                // Heavier stars light up bigger systems (the Solar System's Sun is heavy).
+                // Heavier stars light up bigger systems.
                 let mass_boost = (self.mass / 10_000.0).sqrt().clamp(1.0, 8.0) as f32;
                 (r * r * t * t * t * t).clamp(0.05, 60.0).powf(0.5) * mass_boost * (1.0 + self.flash * 6.0)
             }

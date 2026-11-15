@@ -80,6 +80,8 @@ pub struct Shockwave {
     pub radius: f64,
     pub speed: f64,
     pub max_radius: f64,
+    /// How big the exploded star was next to a model one (see `explode_star`).
+    pub scale: f64,
     pub ejected_mass: f64,
     pub hit: Vec<u64>,
 }
@@ -140,6 +142,7 @@ impl CollisionMode {
 #[derive(Clone, Copy)]
 struct Probe {
     pos: DVec3,
+    vel: DVec3,
     gm: f64,
     radius: f64,
 }
@@ -153,6 +156,21 @@ const MIN_FRAGMENT_RADIUS: f64 = 0.12;
 /// budget is cut to on a slow computer.
 pub const MAX_PAIR_BUDGET: usize = 10_000_000;
 pub const MIN_PAIR_BUDGET: usize = 400_000;
+
+/// The most steps the bodies ever take in one frame, however few of them there are.
+const MAX_STEPS: usize = 20_000;
+/// The most steps in a frame that are taken at the fine `base_dt` before they are lengthened.
+const FINE_STEPS: usize = 700;
+/// A step is never longer than this fraction of the tightest orbit's timescale
+/// (its period / 2 pi): about a hundred steps per orbit.
+const STEP_ORBIT_FRACTION: f64 = 0.06;
+/// ...nor so long that two bodies closing on each other cover more than this
+/// fraction of the gap between their centres.
+const STEP_APPROACH_FRACTION: f64 = 0.25;
+/// The longest step is always allowed to be this long (what it used to be fixed at),
+/// and never longer than the second figure.
+const MIN_LONGEST_STEP: f64 = 0.05;
+const MAX_LONGEST_STEP: f64 = 30.0;
 
 /// A world smaller than this is not torn in two by a glancing hit: it hits or it misses.
 const GRAZE_MIN_RADIUS: f64 = 0.5;
@@ -184,6 +202,9 @@ pub struct Universe {
     pub flashes: Vec<Flash>,
     pub shockwaves: Vec<Shockwave>,
     pub time: f64,
+    /// Built to scale, in the real units of `units.rs` (the Solar System and most
+    /// presets), or a squeezed model (galaxies, old saves) whose numbers are just numbers.
+    pub real_scale: bool,
     pub g: f64,
     pub collisions: CollisionMode,
     pub tidal_disruption: bool,
@@ -211,6 +232,11 @@ pub struct Universe {
     contacts: Vec<Contact>,
     scratch_probes: Vec<Probe>,
     scratch_acc: Vec<DVec3>,
+    /// From the last time the pulls were worked out: the tightest orbit any pair of
+    /// bodies is in (G * mass / distance³, the square of its rate), and the fastest
+    /// any pair is closing (speed / distance). They set the longest safe step.
+    tightest: f64,
+    closing: f64,
 }
 
 impl Universe {
@@ -222,6 +248,7 @@ impl Universe {
             flashes: Vec::new(),
             shockwaves: Vec::new(),
             time: 0.0,
+            real_scale: false,
             g: 1.0,
             collisions: CollisionMode::Realistic,
             tidal_disruption: true,
@@ -243,6 +270,8 @@ impl Universe {
             contacts: Vec::new(),
             scratch_probes: Vec::new(),
             scratch_acc: Vec::new(),
+            tightest: f64::INFINITY,
+            closing: f64::INFINITY,
         }
     }
 
@@ -259,12 +288,14 @@ impl Universe {
         self.sounds.clear();
         self.contacts.clear();
         self.paint.reset_all();
+        self.tightest = f64::INFINITY;
+        self.closing = f64::INFINITY;
     }
 
     pub fn new_body(&mut self, name: &str, kind: BodyKind, pos: DVec3, vel: DVec3) -> Body {
         let id = self.next_id;
         self.next_id += 1;
-        Body::new(id, name, kind, pos, vel, &mut self.rng)
+        Body::new(id, name, kind, pos, vel, self.real_scale, &mut self.rng)
     }
 
     /// After adding bodies with ids of their own (loading a save): new ids start above them.
@@ -297,23 +328,38 @@ impl Universe {
     }
 
     pub fn event(&mut self, msg: impl Into<String>) {
+        // The time it happened: plain seconds in a model universe, else hours, days or years.
         let t = self.time;
-        self.log.push(format!("[t={:>6.1}] {}", t, msg.into()));
+        let when = if !self.real_scale {
+            format!("{t:>6.1}")
+        } else if t < 2.0 * crate::units::DAY {
+            format!("{:.1}h", t * crate::units::SECONDS / 3600.0)
+        } else if t < 2.0 * crate::units::YEAR {
+            format!("{:.0}d", t / crate::units::DAY)
+        } else {
+            format!("{:.1}y", t / crate::units::YEAR)
+        };
+        self.log.push(format!("[t={when}] {}", msg.into()));
         if self.log.len() > 60 {
             self.log.remove(0);
         }
     }
 
-    /// The body exerting the strongest pull at `pos` (excluding `exclude`).
+    /// What something at `pos` would orbit: the body with the strongest tidal grip
+    /// there (mass / distance³), so that the Moon's answer is the Earth even though
+    /// the Sun pulls on it harder. With `exclude` (asking on behalf of that body),
+    /// only bodies of something like its own weight or more count: the Earth does
+    /// not orbit the Moon, nor the Sun Jupiter.
     pub fn dominant_attractor(&self, pos: DVec3, exclude: Option<u64>) -> Option<usize> {
+        let least = exclude.and_then(|id| self.get(id)).map(|b| b.mass * 0.1).unwrap_or(0.0);
         let mut best = None;
         let mut best_a = 0.0;
         for (i, b) in self.bodies.iter().enumerate() {
-            if Some(b.id) == exclude || !b.alive {
+            if Some(b.id) == exclude || !b.alive || b.mass < least {
                 continue;
             }
-            let d2 = (b.pos - pos).length_squared().max(1e-6);
-            let a = b.mass / d2;
+            let d = (b.pos - pos).length().max(1e-3);
+            let a = b.mass / (d * d * d);
             if a > best_a {
                 best_a = a;
                 best = Some(i);
@@ -373,16 +419,22 @@ impl Universe {
         let pairs = n * (n - 1) / 2;
         // Crowded universes get fewer, longer steps (and past the longest step, time
         // simply runs slower than asked) so that a frame never takes too long.
-        let max_steps = (self.pair_budget / pairs).clamp(4, 3000);
-        let steps = ((total / self.base_dt).ceil() as usize).clamp(1, max_steps);
-        let dt = (total / steps as f64).min(0.05);
+        let max_steps = (self.pair_budget / pairs).clamp(4, MAX_STEPS);
+        // Up to a few hundred fine steps a frame; beyond that (time sped up a lot) the
+        // steps get longer instead, for as long as that is safe, and only then more numerous.
+        let wanted = total / ((total / self.base_dt).ceil() as usize).clamp(1, max_steps.min(FINE_STEPS)) as f64;
         let started = std::time::Instant::now();
-        for _ in 0..steps {
+        // Each step is as long as is wanted, unless that is longer than is safe.
+        let (mut left, mut steps) = (total, 0);
+        while left > total * 1e-9 && steps < max_steps {
+            let dt = wanted.min(self.longest_step()).min(left);
             self.step(dt);
+            left -= dt;
+            steps += 1;
         }
         self.step_work = steps * pairs;
         self.step_seconds = started.elapsed().as_secs_f64();
-        let simulated = dt * steps as f64;
+        let simulated = total - left;
         self.time += simulated;
         for b in &mut self.bodies {
             b.spin = (b.spin + b.spin_rate * simulated) % std::f64::consts::TAU;
@@ -494,7 +546,7 @@ impl Universe {
             // Sample trails relative to each body's own orbital timescale (v/|a| ~ T/2pi),
             // so Mercury and Neptune both draw ~2 full orbits.
             let timescale = b.vel.length() / b.acc.length().max(1e-9);
-            let interval = (timescale * std::f64::consts::TAU / 250.0).clamp(0.02, 60.0) * trail_scale;
+            let interval = (timescale * std::f64::consts::TAU / 250.0).clamp(0.02, 1.0e6) * trail_scale;
             if b.trail_accum >= interval {
                 b.trail_accum = 0.0;
                 b.trail.push_back(b.pos);
@@ -567,7 +619,7 @@ impl Universe {
         let n = self.bodies.len();
         let g = self.g;
         self.scratch_probes.clear();
-        self.scratch_probes.extend(self.bodies.iter().map(|b| Probe { pos: b.pos, gm: b.mass * g, radius: b.radius }));
+        self.scratch_probes.extend(self.bodies.iter().map(|b| Probe { pos: b.pos, vel: b.vel, gm: b.mass * g, radius: b.radius }));
         self.scratch_acc.clear();
         self.scratch_acc.resize(n, DVec3::ZERO);
         let tidal = self.tidal_disruption && self.bodies.iter().any(|b| b.kind == BodyKind::BlackHole);
@@ -575,6 +627,7 @@ impl Universe {
         let contacts = &mut self.contacts;
         let pass_through = self.collisions == CollisionMode::PassThrough;
         let probes = &self.scratch_probes[..];
+        let (mut tightest, mut closing) = (0.0f64, 0.0f64);
         for i in 0..n {
             let pi = probes[i];
             let (head, tail) = self.scratch_acc.split_at_mut(i + 1);
@@ -586,6 +639,9 @@ impl Universe {
                 let inv = 1.0 / (s * s.sqrt());
                 ai += d * (pj.gm * inv);
                 *aj -= d * (pi.gm * inv);
+                tightest = tightest.max((pi.gm + pj.gm) * inv);
+                // Positive when the two are getting closer.
+                closing = closing.max(d.dot(pi.vel - pj.vel) / s);
                 // Everything below is the rare path: overlapping bodies or a black hole nearby.
                 let rsum = pi.radius + pj.radius;
                 if d2 < rsum * rsum {
@@ -629,6 +685,27 @@ impl Universe {
         for (b, a) in self.bodies.iter_mut().zip(self.scratch_acc.iter()) {
             b.acc = *a;
         }
+        self.tightest = tightest;
+        self.closing = closing;
+    }
+
+    /// The longest step the bodies can safely take right now: about a hundred steps
+    /// for each turn of the tightest orbit, and never so long that two bodies heading
+    /// for each other could jump through one another. A lone planet far from its
+    /// star can take steps of many seconds; a low moon, or a smash, needs short ones.
+    fn longest_step(&self) -> f64 {
+        // Not known yet (nothing has been stepped): be careful.
+        if !self.tightest.is_finite() || !self.closing.is_finite() {
+            return MIN_LONGEST_STEP;
+        }
+        // The rocket is flown by the same steps, and it turns and burns quickly.
+        let most = if self.ship.is_some() { MIN_LONGEST_STEP } else { MAX_LONGEST_STEP };
+        let orbit = STEP_ORBIT_FRACTION / self.tightest.sqrt().max(1e-12);
+        let approach = STEP_APPROACH_FRACTION / self.closing.max(1e-12);
+        // Rounded down to a power of two, so that a steady orbit gets the same step
+        // every time (which is what keeps it steady) instead of one that wobbles.
+        let step = orbit.min(approach);
+        2f64.powf(step.log2().floor()).clamp(MIN_LONGEST_STEP, most)
     }
 
     fn remove_dead(&mut self) {
@@ -866,7 +943,7 @@ impl Universe {
         b.mass = m;
         match b.kind {
             BodyKind::BlackHole => {
-                b.radius = black_hole_radius(m);
+                b.radius = black_hole_radius(m, self.real_scale);
                 b.feeding = (b.feeding + 1.5).min(4.0);
             }
             BodyKind::Star | BodyKind::NeutronStar => {
@@ -1132,7 +1209,7 @@ impl Universe {
         b.vel = (b.vel * b.mass + s.vel * s.mass) / (b.mass + s.mass);
         b.pos = (b.pos * b.mass + s.pos * s.mass) / (b.mass + s.mass);
         b.mass = m;
-        b.radius = black_hole_radius(m);
+        b.radius = black_hole_radius(m, self.real_scale);
         b.feeding = 4.0;
         let pos = b.pos;
         let vel = b.vel;
@@ -1163,7 +1240,7 @@ impl Universe {
         let eaten = v.mass * 0.3;
         b.vel = (b.vel * b.mass + v.vel * eaten) / (b.mass + eaten);
         b.mass += eaten;
-        b.radius = black_hole_radius(b.mass);
+        b.radius = black_hole_radius(b.mass, self.real_scale);
         b.feeding = (b.feeding + 2.0).min(5.0);
         let bh_name = b.name.clone();
         if !v.name.is_empty() {
@@ -1226,7 +1303,11 @@ impl Universe {
 
     fn explode_star(&mut self, idx: usize) {
         let s = self.bodies[idx].clone();
-        let massive = s.mass >= 15000.0;
+        // Everything about the blast is in proportion to the star: `k` is 1 for the
+        // squeezed stars of a model universe, and about 50 for a real blue giant.
+        let k = (s.radius / 22.0).max(1.0);
+        // The heaviest stars leave a black hole behind, the rest a neutron star.
+        let massive = s.mass >= if self.real_scale { 20.0 * crate::units::SUN_MASS } else { 15000.0 };
         let remnant_mass = if massive { s.mass * 0.3 } else { s.mass * 0.14 };
         let ejected = s.mass - remnant_mass;
         {
@@ -1237,7 +1318,7 @@ impl Universe {
             let mut rng = Rng::new(b.id ^ 0xABCD);
             if massive {
                 b.kind = BodyKind::BlackHole;
-                b.radius = black_hole_radius(remnant_mass);
+                b.radius = black_hole_radius(remnant_mass, self.real_scale);
                 b.surface = Surface::for_kind(BodyKind::BlackHole, &mut rng);
                 b.feeding = 3.0;
             } else {
@@ -1263,7 +1344,10 @@ impl Universe {
             Vec3::new(0.6, 0.35, 1.0) * 1.1,
         ];
         let shell = 16000;
-        let base_speed = 35.0 + s.radius * 1.5;
+        let base_speed = 35.0 * k + s.radius * 1.5;
+        // (The glowing specks are bigger still: a real star's planets are so far out
+        // that the blast is watched from a long way back.)
+        let kf = if k > 2.0 { k as f32 * 5.0 } else { 1.0 };
         for k in 0..shell {
             let dir = self.rng.unit();
             // filamentary structure: clump speeds by direction
@@ -1271,27 +1355,31 @@ impl Universe {
             let speed = base_speed * lumpy * self.rng.range(0.6, 1.2);
             let c = palette[k % palette.len()];
             let life = self.rng.rangef(25.0, 60.0);
-            self.emit(s.pos + dir * s.radius, s.vel + dir * speed, c, self.rng.rangef(0.5, 1.8), life, P_DRAG);
+            // Around a real star the planets are a long way off: half the shell
+            // slows into a nebula near the star and half flies on out past them.
+            let flags = if kf > 2.0 && k % 2 == 0 { 0 } else { P_DRAG };
+            self.emit(s.pos + dir * s.radius, s.vel + dir * speed, c, self.rng.rangef(0.5, 1.8) * kf, life, flags);
         }
         // fast bright blast front
         for _ in 0..5000 {
             let dir = self.rng.unit();
-            self.emit(s.pos + dir * s.radius, s.vel + dir * self.rng.range(90.0, 130.0), Vec3::new(0.9, 0.95, 1.0) * 2.0, 0.9, self.rng.rangef(2.0, 4.0), 0);
+            self.emit(s.pos + dir * s.radius, s.vel + dir * self.rng.range(90.0, 130.0) * k, Vec3::new(0.9, 0.95, 1.0) * 2.0, 0.9 * kf, self.rng.rangef(2.0, 4.0), 0);
         }
         self.flashes.push(Flash { pos: s.pos, color: Vec3::new(0.85, 0.9, 1.0), intensity: 30.0, decay: 0.7, size: (s.radius * 14.0) as f32 });
         self.sound(Sound::Supernova, Some(s.pos), (s.radius * 20.0) as f32);
         self.shockwaves.push(Shockwave {
             center: s.pos,
             radius: s.radius,
-            speed: 110.0,
-            max_radius: 2500.0,
+            speed: 110.0 * k,
+            max_radius: 2500.0 * k,
+            scale: k,
             ejected_mass: ejected,
             hit: vec![s.id],
         });
     }
 
     fn update_shockwaves(&mut self, dt: f64) {
-        let mut hits: Vec<(usize, f64, DVec3, f64)> = Vec::new();
+        let mut hits: Vec<(usize, f64, DVec3, f64, f64)> = Vec::new();
         for w in &mut self.shockwaves {
             let r0 = w.radius;
             w.radius += w.speed * dt;
@@ -1303,12 +1391,14 @@ impl Universe {
                 if d <= w.radius && d >= r0 - b.radius - 5.0 {
                     w.hit.push(b.id);
                     let dir = (b.pos - w.center).try_normalize().unwrap_or(DVec3::X);
-                    hits.push((i, d, dir, w.ejected_mass));
+                    hits.push((i, d, dir, w.ejected_mass, w.scale));
                 }
             }
         }
         self.shockwaves.retain(|w| w.radius < w.max_radius);
-        for (i, d, dir, ej) in hits {
+        for (i, d, dir, ej, k) in hits {
+            // Distances and the mass thrown out, as they would be around a model star.
+            let (d, ej) = (d / k, ej / (k * k * k));
             if i >= self.bodies.len() || !self.bodies[i].alive {
                 continue;
             }
@@ -1425,7 +1515,7 @@ impl Universe {
                 let m = b.mass + gained;
                 b.vel = (b.vel * b.mass + fed.momentum[k].as_dvec3()) / m;
                 match b.kind {
-                    BodyKind::BlackHole => b.radius = black_hole_radius(m),
+                    BodyKind::BlackHole => b.radius = black_hole_radius(m, self.real_scale),
                     BodyKind::NeutronStar => {}
                     _ => b.radius *= (m / b.mass).cbrt(),
                 }
@@ -1732,7 +1822,7 @@ mod tests {
         let mut u = Universe::new("t", 5);
         let mut bh = u.new_body("BH", BodyKind::BlackHole, DVec3::ZERO, DVec3::ZERO);
         bh.mass = 30000.0;
-        bh.radius = black_hole_radius(bh.mass);
+        bh.radius = black_hole_radius(bh.mass, false);
         u.add(bh);
         let p = u.new_body("Victim", BodyKind::Earthlike, DVec3::new(60.0, 0.0, 0.0), DVec3::ZERO).with_mass_radius(40.0, 2.0);
         u.add(p);
@@ -1902,7 +1992,7 @@ mod tests {
         let mut u = Universe::new("t", 5);
         let mut bh = u.new_body("BH", BodyKind::BlackHole, DVec3::ZERO, DVec3::ZERO);
         bh.mass = 30000.0;
-        bh.radius = black_hole_radius(bh.mass);
+        bh.radius = black_hole_radius(bh.mass, false);
         let id = u.add(bh);
         // Already inside the tidal radius, crossing sideways.
         let p = u.new_body("Victim", BodyKind::Earthlike, DVec3::new(15.0, 0.0, 0.0), DVec3::new(0.0, 0.0, 20.0)).with_mass_radius(40.0, 2.0);
@@ -1961,7 +2051,7 @@ mod tests {
         let mut u = Universe::new("t", 5);
         let mut bh = u.new_body("BH", BodyKind::BlackHole, DVec3::ZERO, DVec3::ZERO);
         bh.mass = 30000.0;
-        bh.radius = black_hole_radius(bh.mass);
+        bh.radius = black_hole_radius(bh.mass, false);
         let id = u.add(bh);
         let p = u.new_body("Victim", BodyKind::Earthlike, DVec3::new(15.0, 0.0, 0.0), DVec3::ZERO).with_mass_radius(40.0, 2.0);
         u.add(p);
@@ -2165,31 +2255,36 @@ mod stability {
     use super::*;
     use crate::presets::{self, Preset};
 
-    /// The Solar System preset must stay intact: no lost moons, no planet
-    /// crossings, and the asteroid belt keeps its shape.
+    /// The Solar System preset must stay intact: every planet and moon keeps to the
+    /// orbit it started on (between its closest and furthest points, give or take),
+    /// and the asteroid belt keeps its shape.
     fn run(time_scale: f64, sim_seconds: f64) {
         let mut u = Universe::new("t", 1);
         presets::build(&mut u, Preset::SolarSystem);
         let parent = |n: &str| match n {
-            "Moon" => Some("Earth"),
-            "Phobos" | "Deimos" => Some("Mars"),
-            "Io" | "Europa" | "Ganymede" | "Callisto" => Some("Jupiter"),
-            "Titan" => Some("Saturn"),
-            "Triton" => Some("Neptune"),
-            _ => None,
+            "Moon" => "Earth",
+            "Phobos" | "Deimos" => "Mars",
+            "Io" | "Europa" | "Ganymede" | "Callisto" => "Jupiter",
+            "Mimas" | "Enceladus" | "Tethys" | "Dione" | "Rhea" | "Titan" | "Iapetus" => "Saturn",
+            "Miranda" | "Ariel" | "Umbriel" | "Titania" | "Oberon" => "Uranus",
+            "Triton" => "Neptune",
+            "Charon" => "Pluto",
+            _ => "Sun",
         };
-        let names: Vec<String> = u.bodies.iter().map(|b| b.name.clone()).collect();
         let id = |u: &Universe, n: &str| u.bodies.iter().find(|b| b.name == n).map(|b| b.id).unwrap();
-        // (name, id, parent id or sun, initial distance, min, max)
         let sun = id(&u, "Sun");
-        let mut track: Vec<(String, u64, u64, f64, f64, f64)> = names
+        // (name, id, parent id, closest and furthest points of its orbit, min, max)
+        let mut track: Vec<(String, u64, u64, f64, f64, f64, f64)> = u
+            .bodies
             .iter()
-            .filter(|n| n.as_str() != "Sun")
-            .map(|n| {
-                let me = id(&u, n);
-                let p = parent(n).map(|p| id(&u, p)).unwrap_or(sun);
-                let d = (u.get(me).unwrap().pos - u.get(p).unwrap().pos).length();
-                (n.clone(), me, p, d, d, d)
+            .filter(|b| b.name != "Sun")
+            .map(|b| {
+                let p = u.get(id(&u, parent(&b.name))).unwrap();
+                let (r, v) = (b.pos - p.pos, b.vel - p.vel);
+                let mu = u.g * (b.mass + p.mass);
+                let a = 1.0 / (2.0 / r.length() - v.length_squared() / mu);
+                let e = (1.0 - r.cross(v).length_squared() / (mu * a)).max(0.0).sqrt();
+                (b.name.clone(), b.id, p.id, a * (1.0 - e), a * (1.0 + e), r.length(), r.length())
             })
             .collect();
         let belt0 = u.particles.len();
@@ -2199,21 +2294,23 @@ mod stability {
             for t in track.iter_mut() {
                 let (Some(m), Some(p)) = (u.get(t.1), u.get(t.2)) else { panic!("{} was lost: {:?}", t.0, u.log) };
                 let d = (m.pos - p.pos).length();
-                t.4 = t.4.min(d);
-                t.5 = t.5.max(d);
+                t.5 = t.5.min(d);
+                t.6 = t.6.max(d);
             }
         }
-        for (name, _, _, d0, lo, hi) in &track {
-            println!("{name:9} start {d0:8.1}  min {lo:8.1}  max {hi:8.1}");
-            let tol = if parent(name).is_some() { 0.35 } else if name == "Pluto" { 0.3 } else { 0.12 };
-            assert!(*lo > d0 * (1.0 - tol) && *hi < d0 * (1.0 + tol), "{name} orbit drifted: start {d0:.1} range {lo:.1}..{hi:.1}");
+        assert!(u.time > sim_seconds * 0.98, "time fell behind: {} of {sim_seconds}", u.time);
+        for (name, _, p, near, far, lo, hi) in &track {
+            println!("{name:9} orbit {near:10.1} to {far:10.1}  went {lo:10.1} to {hi:10.1}");
+            // The Sun tugs at the moons' orbits (ours most of all); the planets barely change.
+            let tol = if *p == sun { 0.03 } else { 0.12 };
+            assert!(*lo > near * (1.0 - tol) && *hi < far * (1.0 + tol), "{name} left its orbit: {near:.1}..{far:.1} became {lo:.1}..{hi:.1}");
         }
         let in_belt = u
             .particles
             .iter()
             .filter(|p| {
-                let r = (p.pos.as_dvec3() - u.get(sun).unwrap().pos).length();
-                (880.0..1420.0).contains(&r)
+                let r = (p.pos.as_dvec3() - u.get(sun).unwrap().pos).length() / crate::units::AU;
+                (1.9..3.5).contains(&r)
             })
             .count();
         println!("belt: {in_belt}/{belt0} still in the belt");
@@ -2256,13 +2353,69 @@ mod stability {
 
     #[test]
     fn solar_system_is_stable_at_normal_speed() {
-        // ~7 Earth years
-        run(4.0, 600.0);
+        // Three years at a week a second (the speed the preset starts at).
+        run(7.0 * crate::units::DAY, 3.0 * crate::units::YEAR);
     }
 
     #[test]
     fn solar_system_is_stable_with_time_warp() {
-        // ~45 Earth years / a sizeable chunk of a Jupiter orbit, at heavy time warp
-        run(100.0, 4000.0);
+        // Sixty years (five of Jupiter's) at a year a second.
+        run(crate::units::YEAR, 60.0 * crate::units::YEAR);
+    }
+
+    /// The point of building it to scale: every year, month and day comes out right.
+    #[test]
+    fn solar_system_keeps_real_time() {
+        use crate::units::{DAY, YEAR};
+        let mut u = Universe::new("t", 1);
+        presets::build(&mut u, Preset::SolarSystem);
+        let period = |u: &Universe, name: &str, around: &str| {
+            let (b, p) = (u.bodies.iter().find(|b| b.name == name).unwrap(), u.bodies.iter().find(|b| b.name == around).unwrap());
+            let (r, v) = (b.pos - p.pos, b.vel - p.vel);
+            let mu = u.g * (b.mass + p.mass);
+            let a = 1.0 / (2.0 / r.length() - v.length_squared() / mu);
+            std::f64::consts::TAU * (a.powi(3) / mu).sqrt()
+        };
+        for (name, around, days) in [
+            ("Mercury", "Sun", 87.969),
+            ("Venus", "Sun", 224.701),
+            ("Earth", "Sun", 365.256),
+            ("Mars", "Sun", 686.980),
+            ("Jupiter", "Sun", 4332.59),
+            ("Saturn", "Sun", 10_759.2),
+            ("Uranus", "Sun", 30_688.5),
+            ("Neptune", "Sun", 60_182.0),
+            ("Moon", "Earth", 27.322),
+            ("Phobos", "Mars", 0.3189),
+            ("Io", "Jupiter", 1.7691),
+            ("Titan", "Saturn", 15.945),
+            ("Triton", "Neptune", 5.877),
+            ("Charon", "Pluto", 6.387),
+        ] {
+            let got = period(&u, name, around) / DAY;
+            assert!((got / days - 1.0).abs() < 0.01, "{name} goes round {around} in {got:.3} days, not {days}");
+        }
+        // And it is not just the starting numbers: let a year go by and see where the Earth is.
+        let earth = |u: &Universe| {
+            let (e, s) = (u.bodies.iter().find(|b| b.name == "Earth").unwrap(), u.bodies.iter().find(|b| b.name == "Sun").unwrap());
+            (e.pos - s.pos).normalize()
+        };
+        let start = earth(&u);
+        let mut quarter = None;
+        while u.time < YEAR {
+            u.update(1.0 / 60.0, 30.0 * DAY, false);
+            if quarter.is_none() && u.time >= YEAR / 4.0 {
+                quarter = Some(earth(&u));
+            }
+        }
+        assert!(quarter.unwrap().dot(start).abs() < 0.1, "a quarter of the way round after three months");
+        assert!(earth(&u).dot(start) > 0.99, "back where it started after a year: {}", earth(&u).dot(start));
+        // Sizes: the Sun is 109 Earths across, and Jupiter 11.
+        let radius = |n: &str| u.bodies.iter().find(|b| b.name == n).unwrap().radius;
+        assert!((radius("Sun") / radius("Earth") - 109.2).abs() < 0.1);
+        assert!((radius("Jupiter") / radius("Earth") - 10.97).abs() < 0.05);
+        // A day on Earth is 24 hours (48 units of time).
+        let spin = u.bodies.iter().find(|b| b.name == "Earth").unwrap().spin_rate;
+        assert!((std::f64::consts::TAU / spin / DAY - 0.9973).abs() < 0.001);
     }
 }

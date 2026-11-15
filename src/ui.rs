@@ -22,6 +22,7 @@ use crate::icons::Icon;
 use crate::paint::Brush;
 use crate::presets::{CenterKind, Preset};
 use crate::save;
+use crate::units;
 use crate::universe::CollisionMode;
 
 mod hud;
@@ -589,24 +590,33 @@ fn center_info(c: CenterKind) -> (Icon, &'static str, Color32) {
     }
 }
 
-fn fmt_time(t: f64) -> String {
-    if t < 120.0 {
-        format!("{t:.0}s")
-    } else if t < 7200.0 {
-        format!("{:.1}m", t / 60.0)
+/// A mass slider that reads in Earths in a universe built to scale.
+fn mass_slider(value: &mut f64, real: bool) -> egui::Slider<'_> {
+    if real {
+        egui::Slider::new(value, 1.0e-9..=1.0e15)
+            .logarithmic(true)
+            .custom_formatter(|v, _| units::fmt_mass(v, true))
+            .custom_parser(|s| {
+                let n = units::parse_number(s)?;
+                Some(n * if s.contains("Sun") { units::SUN_MASS } else { units::EARTH_MASS })
+            })
     } else {
-        format!("{:.1}h", t / 3600.0)
+        egui::Slider::new(value, 0.001..=1_000_000.0).logarithmic(true)
     }
 }
 
-fn fmt_speed(s: f64) -> String {
-    if s >= 9.95 {
-        format!("{s:.0}×")
-    } else if s >= 1.0 {
-        let t = format!("{s:.1}");
-        format!("{}×", t.trim_end_matches(".0"))
+/// A radius slider that reads in kilometres in a universe built to scale.
+fn radius_slider(value: &mut f64, real: bool) -> egui::Slider<'_> {
+    if real {
+        egui::Slider::new(value, 0.001..=3000.0)
+            .logarithmic(true)
+            .custom_formatter(|v, _| units::fmt_distance(v, true))
+            .custom_parser(|s| {
+                let n = units::parse_number(s)?;
+                Some(n * if s.contains("million") { 1.0e6 } else { 1.0 } / units::KM)
+            })
     } else {
-        format!("{s:.2}×")
+        egui::Slider::new(value, 0.05..=60.0).logarithmic(true)
     }
 }
 
@@ -780,7 +790,7 @@ fn time_bar(ctx: &egui::Context, game: &mut Game) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             if icon_button(ui, Icon::Slower, 36.0, Look::Plain).on_hover_text("Slow down  ( [ or − )").clicked() {
-                game.time_scale = (game.time_scale / 2.0).max(0.01);
+                game.change_speed(0.5);
             }
             let play_icon = if game.paused { Icon::Play } else { Icon::Pause };
             let tip = if game.paused { "Play  (Space)" } else { "Pause  (Space)" };
@@ -788,13 +798,15 @@ fn time_bar(ctx: &egui::Context, game: &mut Game) {
                 game.paused = !game.paused;
             }
             if icon_button(ui, Icon::Faster, 36.0, Look::Plain).on_hover_text("Speed up  ( ] or + )").clicked() {
-                game.time_scale = (game.time_scale * 2.0).min(1000.0);
+                game.change_speed(2.0);
             }
             ui.add_space(4.0);
             // Be honest when a crowded universe can't keep up with the speed asked for.
             let behind = !game.paused && game.actual_speed < game.time_scale * 0.8;
-            let hint = if behind { format!("Simulation speed. There is so much going on that time is running at about {}", fmt_speed(game.actual_speed)) } else { "Simulation speed".to_string() };
-            let speed = chip(ui, None, &fmt_speed(game.time_scale), 64.0, true).on_hover_text(hint);
+            let real = game.universe.real_scale;
+            let what = if real { "How much time goes by each second" } else { "Simulation speed" };
+            let hint = if behind { format!("{what}. There is so much going on that time is running at about {}", units::fmt_rate(game.actual_speed, real)) } else { what.to_string() };
+            let speed = chip(ui, None, &units::fmt_rate(game.time_scale, real), if real { 92.0 } else { 64.0 }, true).on_hover_text(hint);
             Popup::from_toggle_button_response(&speed)
                 .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
                 .align(RectAlign::BOTTOM)
@@ -803,17 +815,31 @@ fn time_bar(ctx: &egui::Context, game: &mut Game) {
                 .frame(popup_frame())
                 .show(|ui| {
                     ui.set_width(256.0);
-                    section(ui, "Simulation speed");
+                    section(ui, if real { "Each second is..." } else { "Simulation speed" });
                     fill_slider_width(ui);
-                    ui.add(egui::Slider::new(&mut game.time_scale, 0.01..=1000.0).logarithmic(true).suffix("×").max_decimals(2));
-                    ui.horizontal(|ui| {
-                        for v in [0.1, 1.0, 10.0, 100.0, 500.0] {
-                            let sel = (game.time_scale - v).abs() < 1e-6;
-                            if ui.selectable_label(sel, fmt_speed(v)).clicked() {
-                                game.time_scale = v;
+                    let fastest = game.max_time_scale();
+                    let slider = egui::Slider::new(&mut game.time_scale, crate::game::MIN_TIME_SCALE..=fastest).logarithmic(true);
+                    if real {
+                        ui.add(slider.show_value(false));
+                        ui.horizontal_wrapped(|ui| {
+                            for (label, v) in units::RATES {
+                                let sel = (game.time_scale / v - 1.0).abs() < 1e-3;
+                                if ui.selectable_label(sel, label).clicked() {
+                                    game.time_scale = v;
+                                }
                             }
-                        }
-                    });
+                        });
+                    } else {
+                        ui.add(slider.suffix("×").max_decimals(2));
+                        ui.horizontal(|ui| {
+                            for v in [0.1, 1.0, 10.0, 100.0, 500.0] {
+                                let sel = (game.time_scale - v).abs() < 1e-6;
+                                if ui.selectable_label(sel, units::fmt_rate(v, false)).clicked() {
+                                    game.time_scale = v;
+                                }
+                            }
+                        });
+                    }
                 });
             ui.add_space(6.0);
             divider(ui);
@@ -823,9 +849,9 @@ fn time_bar(ctx: &egui::Context, game: &mut Game) {
             let text = if game.paused {
                 bold("Paused", 13.0).color(ACCENT)
             } else {
-                RichText::new(fmt_time(game.universe.time)).monospace().size(13.0).color(TEXT)
+                RichText::new(units::fmt_clock(game.universe.time, game.universe.real_scale)).monospace().size(13.0).color(TEXT)
             };
-            ui.add_sized([58.0, 24.0], egui::Label::new(text)).on_hover_text("Simulated time");
+            ui.add_sized([if game.universe.real_scale { 70.0 } else { 58.0 }, 24.0], egui::Label::new(text)).on_hover_text("Time gone by in this universe");
             ui.add_space(4.0);
         });
     });
@@ -835,7 +861,7 @@ fn view_bar(ctx: &egui::Context, game: &mut Game) {
     floating(ctx, "bar_view", Align2::RIGHT_TOP, vec2(-EDGE, EDGE), glass(6), |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            if icon_button(ui, Icon::Orbit, 36.0, Look::Toggle(game.settings.trails)).on_hover_text("Orbit trails  (T)").clicked() {
+            if icon_button(ui, Icon::Orbit, 36.0, Look::Toggle(game.settings.trails)).on_hover_text("Orbits and trails  (T)").clicked() {
                 game.settings.trails = !game.settings.trails;
             }
             if icon_button(ui, Icon::Tag, 36.0, Look::Toggle(game.settings.labels)).on_hover_text("Labels  (L)").clicked() {
@@ -1022,9 +1048,8 @@ fn select_tool(ui: &mut Ui, game: &mut Game) {
     match which {
         Some(0) => {
             let pos = game.camera.target;
+            // (Born with the mass and size of its kind for this universe's scale.)
             let mut b = game.universe.new_body("Black Hole", BodyKind::BlackHole, pos, DVec3::ZERO);
-            b.mass = 20000.0;
-            b.radius = black_hole_radius(b.mass);
             if let Some(i) = game.universe.dominant_attractor(pos, None) {
                 b.vel = game.universe.bodies[i].vel;
             }
@@ -1040,8 +1065,9 @@ fn select_tool(ui: &mut Ui, game: &mut Game) {
             let side = crate::util::any_perpendicular(dir) * game.camera.distance * 0.08;
             let v = (target + side - start).normalize() * 14.0;
             let mut b = game.universe.new_body("Rogue Planet", BodyKind::GasGiant, start, v);
-            b.mass = 600.0;
-            b.radius = 7.0;
+            // A good deal heavier than Jupiter.
+            b.mass *= 2.4;
+            b.radius *= 1.17;
             game.universe.add(b);
             game.universe.event("A rogue gas giant is passing through!");
         }
@@ -1059,10 +1085,11 @@ fn select_tool(ui: &mut Ui, game: &mut Game) {
 }
 
 fn spawn_tool(ui: &mut Ui, game: &mut Game) {
+    let real = game.universe.real_scale;
     let s = &mut game.spawn;
     section(ui, "Body");
     if kind_grid(ui, &mut s.kind) {
-        let (m, r) = s.kind.defaults();
+        let (m, r) = s.kind.defaults(real);
         s.mass = m;
         s.radius = r;
         s.rings = s.kind == BodyKind::GasGiant;
@@ -1070,9 +1097,9 @@ fn spawn_tool(ui: &mut Ui, game: &mut Game) {
     ui.add_space(4.0);
     text_field(ui, egui::TextEdit::singleline(&mut s.name).hint_text("Name (automatic)").desired_width(f32::INFINITY).margin(Margin::symmetric(10, 6)));
     section(ui, "Properties");
-    slider_row(ui, "Mass", egui::Slider::new(&mut s.mass, 0.01..=100000.0).logarithmic(true));
+    slider_row(ui, "Mass", mass_slider(&mut s.mass, real));
     if s.kind != BodyKind::BlackHole {
-        slider_row(ui, "Radius", egui::Slider::new(&mut s.radius, 0.1..=40.0).logarithmic(true));
+        slider_row(ui, "Radius", radius_slider(&mut s.radius, real));
     }
     if s.kind == BodyKind::Star {
         slider_row(ui, "Temperature", egui::Slider::new(&mut s.temperature, 2500.0..=30000.0).logarithmic(true).suffix(" K"));
@@ -1109,9 +1136,16 @@ fn smash_tool(ui: &mut Ui, game: &mut Game) {
     kind_grid(ui, &mut game.smash.kind);
     section(ui, "Impact");
     slider_row(ui, "Size", egui::Slider::new(&mut game.smash.size, 0.2..=4.0).logarithmic(true).suffix("×"));
-    slider_row(ui, "Speed", egui::Slider::new(&mut game.smash.speed, 2.0..=120.0).logarithmic(true));
-    let (m0, _) = game.smash.kind.defaults();
-    ui.label(RichText::new(format!("Projectile mass ≈ {:.2}", m0 * game.smash.size.powi(3))).size(11.5).color(FAINT));
+    let speed = egui::Slider::new(&mut game.smash.speed, 2.0..=120.0).logarithmic(true);
+    let speed = if game.universe.real_scale {
+        speed.custom_formatter(|v, _| units::fmt_speed(v, true)).custom_parser(|s| units::parse_number(s).map(|n| n / units::KM_PER_S))
+    } else {
+        speed
+    };
+    slider_row(ui, "Speed", speed);
+    let real = game.universe.real_scale;
+    let (m0, _) = game.smash.kind.defaults(real);
+    ui.label(RichText::new(format!("Projectile mass ≈ {}", units::fmt_mass(m0 * game.smash.size.powi(3), real))).size(11.5).color(FAINT));
     ui.add_space(4.0);
     if let Some(id) = game.selected {
         let mut act = None;
@@ -1189,6 +1223,8 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
     let exploring = game.exploring();
     let max_h = (ctx.content_rect().height() - BELOW_BARS - if exploring { 230.0 } else { 70.0 }).max(200.0);
     let conditions = crate::conditions::conditions(&game.universe, &game.universe.bodies[idx]);
+    let real = game.universe.real_scale;
+    let time_scale = game.time_scale;
     let solid = crate::terrain::has_solid_surface(game.universe.bodies[idx].kind);
 
     window_panel(ctx, "inspector", Align2::RIGHT_TOP, vec2(-EDGE, BELOW_BARS), 14, |ui| {
@@ -1239,7 +1275,7 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
                         orphaned_layer = b.paint_layer.take();
                     }
                     if kind == BodyKind::BlackHole {
-                        b.radius = black_hole_radius(b.mass);
+                        b.radius = black_hole_radius(b.mass, real);
                         b.feeding = 1.0;
                     }
                     if kind == BodyKind::Star {
@@ -1266,16 +1302,16 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
                     let w = ((ui.available_width() - 12.0) / 3.0).floor();
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        stat_cell(ui, "Distance", &format!("{d:.1}"), TEXT, w);
-                        stat_cell(ui, "Speed", &format!("{v:.2}"), TEXT, w);
+                        stat_cell(ui, "Distance", &units::fmt_distance(*d, real), TEXT, w);
+                        stat_cell(ui, "Speed", &units::fmt_speed(*v, real), TEXT, w);
                         match period {
-                            Some(p) => stat_cell(ui, "Period", &fmt_time(*p), TEXT, w),
-                            None => stat_cell(ui, "Period", "Escaping", DANGER, w),
+                            Some(p) => stat_cell(ui, if real { "One orbit" } else { "Period" }, &units::fmt_duration(*p, real), TEXT, w),
+                            None => stat_cell(ui, if real { "One orbit" } else { "Period" }, "Escaping", DANGER, w),
                         }
                     });
                 }
                 None => {
-                    ui.label(RichText::new("Drifting freely").size(12.0).color(MUTED));
+                    ui.label(RichText::new("Not orbiting anything").size(12.0).color(MUTED));
                 }
             }
 
@@ -1303,7 +1339,8 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
             }
             if b.kind == BodyKind::Star {
                 match b.supernova_timer {
-                    Some(t) => items.push((Icon::Warning, format!("Boom in {t:.1}s"), "It's going to blow!", Action::Supernova, Some(DANGER), true)),
+                    // Counted in seconds of play, however fast time is running.
+                    Some(t) => items.push((Icon::Warning, format!("Boom in {:.1}s", t / time_scale.max(1e-6)), "It's going to blow!", Action::Supernova, Some(DANGER), true)),
                     None => items.push((Icon::Supernova, "Supernova".into(), "Make this star explode", Action::Supernova, Some(Color32::from_rgb(255, 160, 120)), false)),
                 }
             }
@@ -1345,12 +1382,12 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
 
             // Physical properties.
             section(ui, "Physical");
-            slider_row(ui, "Mass", egui::Slider::new(&mut b.mass, 0.001..=1_000_000.0).logarithmic(true));
+            slider_row(ui, "Mass", mass_slider(&mut b.mass, real));
             if b.kind == BodyKind::BlackHole {
-                b.radius = black_hole_radius(b.mass);
+                b.radius = black_hole_radius(b.mass, real);
                 slider_row(ui, "Accretion", egui::Slider::new(&mut b.feeding, 0.0..=5.0));
             } else {
-                slider_row(ui, "Radius", egui::Slider::new(&mut b.radius, 0.05..=60.0).logarithmic(true));
+                slider_row(ui, "Radius", radius_slider(&mut b.radius, real));
             }
             if b.kind == BodyKind::Star && slider_row(ui, "Temperature", egui::Slider::new(&mut b.temperature, 2500.0..=30000.0).logarithmic(true).suffix(" K")).changed() {
                 b.update_star_colors();
@@ -1394,8 +1431,8 @@ fn inspector(ctx: &egui::Context, game: &mut Game) {
                     });
                 }
                 if let Some(r) = &mut b.ring {
-                    slider_row(ui, "Ring inner", egui::Slider::new(&mut r.inner, 0.1..=100.0).logarithmic(true));
-                    slider_row(ui, "Ring outer", egui::Slider::new(&mut r.outer, 0.1..=150.0).logarithmic(true));
+                    slider_row(ui, "Ring inner", egui::Slider::new(&mut r.inner, 0.1..=300.0).logarithmic(true));
+                    slider_row(ui, "Ring outer", egui::Slider::new(&mut r.outer, 0.1..=450.0).logarithmic(true));
                     ui.horizontal(|ui| {
                         ui.allocate_ui_with_layout(vec2(84.0, 24.0), Layout::left_to_right(Align::Center), |ui| {
                             ui.set_min_width(84.0);
@@ -1879,10 +1916,8 @@ fn draw_labels(ctx: &egui::Context, game: &Game, cam: &CameraFrame, ppp: f32) {
         if r < 2.0 && !b.kind.is_luminous() {
             painter.circle_stroke(p, 3.0, Stroke::new(1.0, white(70)));
         }
-        let is_moon = b.mass < 1.0 && !selected && !hovered;
-        if is_moon && r < 3.0 && sandbox && game.camera.distance > 80.0 {
-            continue;
-        }
+        // (A moon too close to its planet to tell apart loses its label to the planet
+        // below, because the heavier of two overlapping labels wins.)
         let at = egui::pos2(p.x, p.y + r + 6.0);
         let font = if selected { FontId::new(12.5, bold_family()) } else { FontId::proportional(12.0) };
         let galley = painter.layout_no_wrap(b.name.clone(), font, if selected { ACCENT } else { white(185) });

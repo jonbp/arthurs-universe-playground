@@ -10,13 +10,31 @@ use glam::DVec3;
 use crate::body::{Body, BodyKind};
 use crate::universe::Universe;
 
-/// One "astronomical unit": Earth's orbit radius in the Solar System preset.
-const AU: f64 = 430.0;
-/// The preset Sun's radius and temperature (luminosity 1).
-const SUN_RADIUS: f64 = 16.0;
-const SUN_TEMP: f64 = 5800.0;
-/// Surface gravity of the preset Earth (mass 40, radius 2, G = 1).
-const EARTH_GRAVITY: f64 = 10.0;
+/// What "like the Earth" means in a universe: the real figures in one built to
+/// scale, and those of the old squeezed Solar System in a model one (old saves).
+struct Yardstick {
+    /// The distance from the Earth to the Sun.
+    au: f64,
+    /// The Sun's radius and temperature (brightness 1).
+    sun_radius: f64,
+    sun_temp: f64,
+    /// Gravity at the Earth's surface.
+    earth_gravity: f64,
+}
+
+fn yardstick(u: &Universe) -> Yardstick {
+    use crate::units;
+    if u.real_scale {
+        Yardstick {
+            au: units::AU,
+            sun_radius: units::SUN_RADIUS,
+            sun_temp: units::SUN_TEMPERATURE as f64,
+            earth_gravity: units::EARTH_MASS / (units::EARTH_RADIUS * units::EARTH_RADIUS),
+        }
+    } else {
+        Yardstick { au: 430.0, sun_radius: 16.0, sun_temp: 5800.0, earth_gravity: 10.0 }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Level {
@@ -44,15 +62,17 @@ pub struct Conditions {
     pub water: &'static str,
     pub verdict: &'static str,
     pub level: Level,
+    /// Whether the universe is built to scale (how the day and escape speed are worded).
+    pub real_scale: bool,
     /// How much the temperature follows the sun (0 = thick air evens it out, 1 = none).
     swing: f64,
     solid: bool,
 }
 
 /// Physical brightness of a star relative to the preset Sun.
-fn star_power(b: &Body) -> f64 {
+fn star_power(b: &Body, y: &Yardstick) -> f64 {
     match b.kind {
-        BodyKind::Star => (b.radius / SUN_RADIUS).powi(2) * (b.temperature as f64 / SUN_TEMP).powi(4),
+        BodyKind::Star => (b.radius / y.sun_radius).powi(2) * (b.temperature as f64 / y.sun_temp).powi(4),
         BodyKind::NeutronStar => 0.002,
         _ => 0.0,
     }
@@ -60,21 +80,23 @@ fn star_power(b: &Body) -> f64 {
 
 /// Starlight arriving at `pos` (Earth = 1), ignoring `exclude`.
 pub fn sunlight_at(u: &Universe, pos: DVec3, exclude: Option<u64>) -> f64 {
+    let y = yardstick(u);
     u.bodies
         .iter()
         .filter(|s| Some(s.id) != exclude && s.kind.is_luminous())
-        .map(|s| star_power(s) / ((s.pos - pos).length_squared() / (AU * AU)).max(1e-9))
+        .map(|s| star_power(s, &y) / ((s.pos - pos).length_squared() / (y.au * y.au)).max(1e-9))
         .sum()
 }
 
 /// Direction to the star that lights `pos` the most.
 pub fn sun_direction(u: &Universe, pos: DVec3, exclude: Option<u64>) -> Option<DVec3> {
+    let y = yardstick(u);
     u.bodies
         .iter()
         .filter(|s| Some(s.id) != exclude && s.kind.is_luminous())
         .max_by(|a, b| {
-            let fa = star_power(a) / (a.pos - pos).length_squared().max(1e-9);
-            let fb = star_power(b) / (b.pos - pos).length_squared().max(1e-9);
+            let fa = star_power(a, &y) / (a.pos - pos).length_squared().max(1e-9);
+            let fb = star_power(b, &y) / (b.pos - pos).length_squared().max(1e-9);
             fa.total_cmp(&fb)
         })
         .and_then(|s| (s.pos - pos).try_normalize())
@@ -98,8 +120,10 @@ fn pressure(b: &Body, gravity_g: f64) -> f64 {
     let a = b.surface.atmo_strength.max(0.0) as f64;
     match b.kind {
         BodyKind::Earthlike => (a / 0.9) * gravity_g,
-        BodyKind::Desert => 0.006 * (a / 0.25) * (gravity_g / 0.22),
-        BodyKind::Cloudy => 92.0 * (b.mass / 32.0).powf(0.6) * (a / 0.6),
+        // Mars: 0.006 atmospheres under 0.38 of Earth's gravity.
+        BodyKind::Desert => 0.006 * (a / 0.25) * (gravity_g / 0.38),
+        // Fitted to the two real ones: Venus (92 atmospheres) and Titan (1.45).
+        BodyKind::Cloudy => 92.0 * (b.mass / 32.56).powf(1.156) * (a / 0.6),
         BodyKind::Lava => 0.3 * (a / 0.4) * gravity_g,
         BodyKind::GasGiant | BodyKind::IceGiant => 1.0,
         // Airless kinds only have air if someone gives them an atmosphere.
@@ -110,7 +134,7 @@ fn pressure(b: &Body, gravity_g: f64) -> f64 {
 
 pub fn conditions(u: &Universe, b: &Body) -> Conditions {
     let gravity = u.g * b.mass / (b.radius * b.radius).max(1e-9);
-    let gravity_g = gravity / EARTH_GRAVITY;
+    let gravity_g = gravity / yardstick(u).earth_gravity;
     let escape_speed = (2.0 * u.g * b.mass / b.radius.max(1e-9)).sqrt();
     let day_length = (b.spin_rate.abs() > 1e-4).then(|| std::f64::consts::TAU / b.spin_rate.abs());
 
@@ -133,6 +157,7 @@ pub fn conditions(u: &Universe, b: &Body) -> Conditions {
             water: "None",
             verdict,
             level: Level::Danger,
+            real_scale: u.real_scale,
             swing: 0.0,
             solid: false,
         };
@@ -229,6 +254,7 @@ pub fn conditions(u: &Universe, b: &Body) -> Conditions {
         water,
         verdict,
         level,
+        real_scale: u.real_scale,
         swing,
         solid,
     }

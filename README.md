@@ -52,16 +52,22 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 
 | Preset | What happens |
 |---|---|
-| The Solar System | Sun, 8 planets plus Pluto, the Moon, Galilean moons, Titan, Triton, rings, asteroid belt |
-| Solar System vs Rogue Black Hole | A black hole plows through the Solar System |
+| The Solar System | To scale: the Sun, 8 planets, Pluto and Charon, Ceres, Vesta, 20 moons, rings and the asteroid belt, each with its real size, mass, orbit, day and tilt |
+| Solar System vs Rogue Black Hole | A black hole of ten Suns plows through the Solar System at 60 km/s |
 | Theia Impact | A Mars-sized world strikes the proto-Earth a glancing blow, and a piece left in orbit becomes the Moon |
 | Head-on Planet Smash | Two worlds collide head-on |
 | Binary Star System | Circumbinary planets around two suns |
-| Black Hole Feast | A supermassive black hole, a doomed star and planets |
-| Supernova Countdown | A blue supergiant explodes after 20 seconds |
-| Galaxy Collision | Two ~34k-star galaxies collide |
-| Protoplanetary Disk | Planetesimals merge into planets |
+| Black Hole Feast | A black hole of four million Suns (12 million km across), a doomed star and planets |
+| Supernova Countdown | A blue giant explodes after 20 seconds |
+| Galaxy Collision | Two ~34k-star galaxies collide (a model, not to scale) |
+| Protoplanetary Disk | Planetesimals merge into planets (a model, not to scale) |
 | Empty Universe | Build from scratch |
+
+### Everything is its real size
+
+Except for the two models, universes are built to scale from NASA and JPL figures. One unit of length is half the Earth's radius and one unit of time is half an hour, so at the slowest normal speed a second of play is 30 minutes; the speed control reads in time per second (30 min/s, 1 day/s, 1 week/s, up to 10 years/s) and distances, speeds and orbits are shown in km, km/s, days and years. The planets start where they really were on 1 January 2000. The Sun is 109 Earths wide and 23,500 Earth-radii away, which makes planets specks from afar: every world is drawn as a dot with its orbit as a line until you zoom in (double-click to follow one).
+
+Two things are still drawn bigger than life, because the real ones would be too small to find: neutron stars, and black holes lighter than a few hundred thousand Suns. Rockets and astronauts are giants too (a rocket is about 150 km long).
 
 ## Controls
 
@@ -165,7 +171,8 @@ CI (`.github/workflows/ci.yml`) builds and tests on Windows, macOS and Linux for
 
 ## How it works
 
-- **Physics** (`src/universe.rs`): f64 N-body gravity with a kick-drift-kick leapfrog integrator and adaptive sub-stepping.
+- **Physics** (`src/universe.rs`): f64 N-body gravity with a kick-drift-kick leapfrog integrator and adaptive sub-stepping: each step is as long as the tightest orbit and the fastest approach allow, so the Solar System can run at years per second with Phobos (a 7.7-hour orbit) still on course.
+  - `src/units.rs` defines the real-world units and how numbers are worded.
   - Collisions use the specific impact energy Q against a catastrophic-disruption threshold Q*_RD (after Leinhardt & Stewart 2012) to decide between merging, cratering and fragmentation.
   - Black holes disrupt bodies inside the tidal radius r_t = R·(2M/m)^⅓.
   - Supernovae send out a shock front that applies impulses and scorches surfaces.
@@ -174,7 +181,7 @@ CI (`.github/workflows/ci.yml`) builds and tests on Windows, macOS and Linux for
 - **Exploring** (`src/explore.rs`, `src/rocket.rs`, `src/terrain.rs`, `src/conditions.rs`):
   - `terrain.rs` is a CPU copy of the planet shader's height function. Both hash the noise lattice with integer maths, which is bit-exact on every GPU, so the ground you stand on is the ground that is drawn.
   - A landed rocket and a walking astronaut are stored in the body's own rotating coordinates, so the ground stays still underfoot while the planet spins and orbits.
-  - `conditions.rs` is a small climate model (starlight, albedo, greenhouse warming from air pressure, internal heat), calibrated so the Solar System preset lands near the real temperatures.
+  - `conditions.rs` is a small climate model (starlight, albedo, greenhouse warming from air pressure, internal heat), which lands near the real temperatures for the real Solar System.
 - **Updates** (`src/update.rs`): a background thread asks the GitHub releases API for the latest tag and compares it with the built version.
 - **Rendering** (`src/renderer.rs`, `shaders/`): raw Vulkan through `ash`.
   - Shaders are written in WGSL and compiled to SPIR-V at build time by `naga` (see `build.rs`), so no shader SDK is needed.

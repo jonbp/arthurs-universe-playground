@@ -35,6 +35,14 @@ const FIRST_PERSON_FOV: f32 = 1.15;
 /// In easy flying the engine always gives at least this many times the local gravity.
 const EASY_THRUST_MARGIN: f64 = 2.5;
 
+/// How big the astronaut is on world `b`, next to the usual size. To scale, some
+/// moons are only a few kilometres across (Phobos, Deimos): on anything much smaller
+/// than our Moon the astronaut, the stride and the jump all shrink with the world,
+/// or one step would carry you right round it.
+pub fn person_scale(b: &Body) -> f64 {
+    (b.radius / 0.5).min(1.0)
+}
+
 pub enum Mode {
     Sandbox,
     Flight(Flight),
@@ -471,16 +479,17 @@ impl Walk {
         // Turn, then step along the ground. Angles are distances over the surface radius.
         self.heading = (DQuat::from_axis_angle(self.local, -c.turn * 1.8 * dt) * self.heading).normalize();
         let right = self.heading.cross(self.local);
-        let speed = WALK_SPEED * if c.run { RUN_FACTOR } else { 1.0 };
+        let scale = person_scale(b);
+        let speed = WALK_SPEED * scale * if c.run { RUN_FACTOR } else { 1.0 };
         let step = (self.heading * c.forward + right * c.strafe) * speed * dt;
         let ground = terrain::surface_radius(b, &u.paint, self.local.as_vec3()).max(1e-6);
         self.local = (self.local + step / ground).normalize();
         self.heading = (self.heading - self.local * self.heading.dot(self.local)).try_normalize().unwrap_or_else(|| tangent(self.local));
         // Jumping: the lighter the world, the higher and slower the hop.
         let gravity_g = u.g * b.mass / (b.radius * b.radius).max(1e-9) / 10.0;
-        let g = gravity_g.clamp(0.03, 5.0) * 0.25;
+        let g = gravity_g.clamp(0.03, 5.0) * 0.25 * scale;
         if jump && self.height <= 0.0 {
-            self.vspeed = JUMP_SPEED;
+            self.vspeed = JUMP_SPEED * scale;
         }
         if self.height > 0.0 || self.vspeed > 0.0 {
             self.height += self.vspeed * dt;
@@ -699,7 +708,7 @@ impl Game {
                 }
             },
             Mode::Walk(w) => {
-                let radius = self.universe.get(w.body).map(|b| b.radius).unwrap_or(1.0);
+                let radius = self.universe.get(w.body).map(|b| b.radius / person_scale(b)).unwrap_or(1.0);
                 let (rocket, local, fuel) = match &w.parked {
                     Some(p) if p.local.angle_between(w.local) * radius > BOARD_RANGE => {
                         self.universe.event("Your rocket is too far away: walk back to it");
@@ -859,7 +868,8 @@ impl Game {
             Mode::Walk(walk) => match self.universe.get(walk.body) {
                 Some(b) => {
                     let (feet, up, forward) = walk.pose(&self.universe, b);
-                    CameraFrame::look(feet + up * EYE_HEIGHT, forward, up, FIRST_PERSON_FOV, 0.0008, w, h)
+                    let scale = person_scale(b);
+                    CameraFrame::look(feet + up * EYE_HEIGHT * scale, forward, up, FIRST_PERSON_FOV, (0.0008 * scale) as f32, w, h)
                 }
                 None => self.camera.frame(w, h),
             },
@@ -991,7 +1001,7 @@ impl Game {
             sky,
             airborne: w.height,
             rocket: w.parked.as_ref().map(|p| {
-                let d = p.local.angle_between(w.local) * b.radius;
+                let d = p.local.angle_between(w.local) * b.radius / person_scale(b);
                 (d, d <= BOARD_RANGE)
             }),
         })

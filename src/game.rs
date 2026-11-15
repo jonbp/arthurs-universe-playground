@@ -46,6 +46,88 @@ impl Tool {
     }
 }
 
+/// The path each named body is on, worked out from where it is and how it is moving
+/// right now: an ellipse round whatever it orbits. At the true scale of a solar
+/// system the planets are specks, and these lines are how you find them.
+///
+/// Each line starts at the body and runs backwards round the orbit, bright behind
+/// the body and fading, so it also shows which way the body is going.
+fn orbit_lines(u: &Universe, cam: &CameraFrame, out: &mut Vec<Polyline>, on_orbit: &mut Vec<u64>) {
+    const SEGMENTS: usize = 128;
+    const MOST: usize = 64;
+    let mut drawn = 0;
+    for b in &u.bodies {
+        if drawn >= MOST {
+            break;
+        }
+        if !b.alive || b.name.is_empty() || b.name.contains(" fragment ") || b.name.starts_with("Projectile") {
+            continue;
+        }
+        // What it goes round: the heavier body with the strongest grip on it (mass /
+        // distance³, so the Moon gets the Earth, not the Sun). The heaviest body of
+        // all has an orbit only if it has a partner of something like its own weight.
+        let grip = |o: &Body| o.mass / (o.pos - b.pos).length().powi(3).max(1e-12);
+        let others = || u.bodies.iter().filter(|o| o.alive && o.id != b.id);
+        let primary = others().filter(|o| o.mass > b.mass).max_by(|x, y| grip(x).total_cmp(&grip(y))).or_else(|| others().filter(|o| o.mass >= b.mass * 0.1).max_by(|x, y| grip(x).total_cmp(&grip(y))));
+        let Some(primary) = primary else { continue };
+        // Anything close beside the primary (the other star of a pair, a planet's
+        // inner moons) is part of what is being orbited.
+        let near = (primary.pos - b.pos).length() * 0.5;
+        let (mut mass, mut pos, mut vel) = (0.0, DVec3::ZERO, DVec3::ZERO);
+        for o in others().filter(|o| (o.pos - primary.pos).length() <= near) {
+            mass += o.mass;
+            pos += o.pos * o.mass;
+            vel += o.vel * o.mass;
+        }
+        let (pos, vel) = (pos / mass, vel / mass);
+        let (r, v) = (b.pos - pos, b.vel - vel);
+        let mu = u.g * (mass + b.mass);
+        let dist = r.length();
+        let energy = v.length_squared() / 2.0 - mu / dist.max(1e-9);
+        if energy >= 0.0 {
+            continue; // not in orbit: passing through, or escaping
+        }
+        let a = -mu / (2.0 * energy);
+        let h = r.cross(v);
+        let towards_closest = v.cross(h) / mu - r / dist;
+        let e = towards_closest.length();
+        let Some(north) = h.try_normalize() else { continue };
+        if e > 0.98 {
+            continue;
+        }
+        on_orbit.push(b.id);
+        let x = if e > 1e-6 { towards_closest / e } else { r / dist };
+        let y = north.cross(x);
+        let short = a * (1.0 - e * e).sqrt();
+        // Both of them go round the balance point between them.
+        let share = mass / (mass + b.mass);
+        let centre = pos + r * (1.0 - share);
+        let size = cam.screen_radius(centre, a * share);
+        if !(6.0..1.0e7).contains(&size) {
+            continue; // too small to see from here (a moon's, from afar)
+        }
+        let start = (r.dot(y) / short).atan2(r.dot(x) / a + e);
+        let points: Vec<DVec3> = (0..=SEGMENTS)
+            .map(|k| {
+                // Closely spaced near the body, where the line must pass through it.
+                let s = k as f64 / SEGMENTS as f64;
+                let angle = start - std::f64::consts::TAU * s + 0.9 * (std::f64::consts::TAU * s).sin();
+                centre + (x * (a * (angle.cos() - e)) + y * (short * angle.sin())) * share
+            })
+            .collect();
+        let c = b.trail_color();
+        out.push(Polyline { points: points.clone(), color: Vec4::new(c.x, c.y, c.z, 0.1), dashed: false, fade: false });
+        out.push(Polyline { points, color: Vec4::new(c.x, c.y, c.z, 0.4), dashed: false, fade: true });
+        drawn += 1;
+    }
+}
+
+/// The slowest and (in a model universe) the fastest that time can be set to run.
+pub const MIN_TIME_SCALE: f64 = 0.01;
+const MAX_MODEL_TIME_SCALE: f64 = 1000.0;
+/// In a universe built to scale: ten years every second.
+const MAX_REAL_TIME_SCALE: f64 = 10.0 * crate::units::YEAR;
+
 pub struct SpawnSettings {
     pub kind: BodyKind,
     pub mass: f64,
@@ -126,6 +208,9 @@ pub struct Game {
     spawn_current: Option<DVec3>,
     painting: bool,
     pub preview: Vec<Polyline>,
+    /// Bodies whose orbit is drawn as a line this frame. They need no trail as well:
+    /// a moon's trail is the looping path it takes round the Sun, which only confuses.
+    pub on_orbit: Vec<u64>,
 }
 
 impl Game {
@@ -184,9 +269,27 @@ impl Game {
             spawn_current: None,
             painting: false,
             preview: Vec::new(),
+            on_orbit: Vec::new(),
         };
         g.load_preset(Preset::SolarSystem);
         g
+    }
+
+    pub fn max_time_scale(&self) -> f64 {
+        if self.universe.real_scale { MAX_REAL_TIME_SCALE } else { MAX_MODEL_TIME_SCALE }
+    }
+
+    /// Make time run `factor` times as fast (or slow), within the limits.
+    pub fn change_speed(&mut self, factor: f64) {
+        self.time_scale = (self.time_scale * factor).clamp(MIN_TIME_SCALE, self.max_time_scale());
+    }
+
+    /// A new universe may be on a different scale: the tools start from sizes that suit it.
+    pub(crate) fn fit_tools_to_scale(&mut self) {
+        let (m, r) = self.spawn.kind.defaults(self.universe.real_scale);
+        self.spawn.mass = m;
+        self.spawn.radius = r;
+        self.camera.min_distance = 0.3;
     }
 
     /// Back to the plain sandbox before the universe is replaced.
@@ -204,12 +307,8 @@ impl Game {
         self.universe.trail_interval = 1.0;
         presets::build(&mut self.universe, p);
         self.reset_view(p.camera_distance());
-        self.time_scale = match p {
-            Preset::GalaxyCollision => 6.0,
-            Preset::Protoplanetary => 5.0,
-            Preset::SolarSystem | Preset::RogueBlackHole => 2.0,
-            _ => 1.0,
-        };
+        self.time_scale = p.time_scale();
+        self.fit_tools_to_scale();
         self.paused = false;
     }
 
@@ -219,9 +318,11 @@ impl Game {
         self.universe.collisions = crate::universe::CollisionMode::Realistic;
         presets::build_custom(&mut self.universe, &params);
         let extent = self.universe.bodies.iter().map(|b| b.pos.length()).fold(100.0, f64::max);
-        self.reset_view((extent * 1.1).min(3000.0));
+        self.reset_view((extent * 1.1).min(crate::camera::MAX_DISTANCE));
+        self.fit_tools_to_scale();
         self.paused = false;
-        self.time_scale = 1.0;
+        // Fast enough to see the planets move: a week every second (rogue planets only drift).
+        self.time_scale = if params.center == presets::CenterKind::Nothing { 1.0 } else { 7.0 * crate::units::DAY };
     }
 
     fn reset_view(&mut self, dist: f64) {
@@ -247,8 +348,9 @@ impl Game {
                     .iter()
                     .filter(|s| s.kind.is_luminous() && s.id != id)
                     .max_by(|a, c| {
-                        let la = a.luminosity() as f64 / (a.pos - p).length_squared().max(1.0);
-                        let lc = c.luminosity() as f64 / (c.pos - p).length_squared().max(1.0);
+                        let real = self.universe.real_scale;
+                        let la = a.luminosity(real) as f64 / (a.pos - p).length().max(1.0);
+                        let lc = c.luminosity(real) as f64 / (c.pos - p).length().max(1.0);
                         la.total_cmp(&lc)
                     });
                 if let Some(s) = star {
@@ -270,6 +372,7 @@ impl Game {
     pub fn update(&mut self, dt: f64, cam: &CameraFrame, scene_has_pointer: bool) {
         self.real_time += dt;
         self.preview.clear();
+        self.on_orbit.clear();
         self.mode_pre_sim(dt);
         let before = self.universe.time;
         self.universe.update(dt, self.time_scale, self.paused);
@@ -296,6 +399,10 @@ impl Game {
             self.paint_at(cam, dt as f32);
         }
         self.update_preview(cam, scene_has_pointer);
+        // Orbit lines go with the trails (T). Not while walking: they would cross the sky.
+        if self.settings.trails && !matches!(self.mode, Mode::Walk(_)) {
+            orbit_lines(&self.universe, cam, &mut self.preview, &mut self.on_orbit);
+        }
     }
 
     /// Keep the physics inside its share of a frame: from how long the last frame's
@@ -329,7 +436,7 @@ impl Game {
                 let c = &self.universe.bodies[i];
                 let r = (anchor - c.pos).length().max(1.0);
                 let v = (vel - c.vel).length().max(0.1);
-                (std::f64::consts::TAU * r / v * 1.05).clamp(5.0, 8000.0)
+                (std::f64::consts::TAU * r / v * 1.05).clamp(5.0, 300.0 * crate::units::YEAR)
             }
             None => 120.0,
         };
@@ -349,7 +456,7 @@ impl Game {
             return None;
         }
         let t = (plane_y - cam.eye.y) / dir.y;
-        if t <= 0.0 || t > 1e6 {
+        if t <= 0.0 || t > crate::camera::MAX_DISTANCE * 10.0 {
             return None;
         }
         Some(cam.eye + dir * t)
@@ -372,7 +479,13 @@ impl Game {
         };
         if let (Some(a), Some(c)) = (self.spawn_anchor, self.spawn_current) {
             let drag = c - a;
-            let scale = 0.12 * self.spawn.fling_power;
+            // A drag as long as the distance to whatever it will orbit adds about 1.7
+            // times the speed of a circular orbit there, at any scale.
+            let orbit_rate = att.map(|i| {
+                let c = &self.universe.bodies[i];
+                (self.universe.g * c.mass / (anchor - c.pos).length().max(1e-3).powi(3)).sqrt() * 1.7
+            });
+            let scale = orbit_rate.unwrap_or(0.12) * self.spawn.fling_power;
             base += drag * scale;
         }
         base
@@ -622,7 +735,7 @@ impl Game {
         let (kind, mass, radius, temp, rings) = (s.kind, s.mass, s.radius, s.temperature, s.rings);
         let mut b = self.universe.new_body(&name, kind, pos, vel);
         b.mass = mass;
-        b.radius = if kind == BodyKind::BlackHole { black_hole_radius(mass) } else { radius };
+        b.radius = if kind == BodyKind::BlackHole { black_hole_radius(mass, self.universe.real_scale) } else { radius };
         if kind == BodyKind::Star {
             b.temperature = temp;
             b.update_star_colors();
@@ -649,10 +762,11 @@ impl Game {
         let Some(t) = self.universe.get(target) else { return };
         let (tpos, tvel, tr) = (t.pos, t.vel, t.radius);
         let kind = self.smash.kind;
-        let (m0, r0) = kind.defaults();
+        let real = self.universe.real_scale;
+        let (m0, r0) = kind.defaults(real);
         let size = self.smash.size;
         let mass = m0 * size.powi(3);
-        let radius = if kind == BodyKind::BlackHole { black_hole_radius(mass) } else { r0 * size };
+        let radius = if kind == BodyKind::BlackHole { black_hole_radius(mass, real) } else { r0 * size };
         let dir = from_dir.unwrap_or_else(|| {
             let cam_dir = (tpos - self.camera.eye()).normalize();
             // slight random offset so impacts aren't all dead-centre
@@ -706,13 +820,16 @@ impl Game {
 
     pub fn collapse_to_black_hole(&mut self, id: u64) {
         let Some(i) = self.universe.index_of(id) else { return };
+        let real = self.universe.real_scale;
         let b = &mut self.universe.bodies[i];
         let name = b.name.clone();
-        if b.mass < 3000.0 {
-            b.mass = 3000.0; // needs to be heavy enough to be interesting
+        // In a model universe it is made heavy enough to be interesting. To scale, it
+        // keeps its mass, as it really would: its moons carry on round it as before.
+        if !real && b.mass < 3000.0 {
+            b.mass = 3000.0;
         }
         b.kind = BodyKind::BlackHole;
-        b.radius = black_hole_radius(b.mass);
+        b.radius = black_hole_radius(b.mass, real);
         b.surface.colors = [glam::Vec3::ZERO; 3];
         b.surface.atmo_strength = 0.0;
         b.ring = None;
@@ -788,8 +905,8 @@ impl Game {
                 self.spawn_anchor = None;
                 self.spawn_current = None;
             }
-            "=" | "+" | "]" => self.time_scale = (self.time_scale * 2.0).min(1000.0),
-            "-" | "[" => self.time_scale = (self.time_scale / 2.0).max(0.01),
+            "=" | "+" | "]" => self.change_speed(2.0),
+            "-" | "[" => self.change_speed(0.5),
             "h" => self.show_ui = !self.show_ui,
             "f11" => self.settings.fullscreen = !self.settings.fullscreen,
             "t" => self.settings.trails = !self.settings.trails,
@@ -825,6 +942,60 @@ mod tests {
         g.camera.distance = g.camera.desired_distance;
         let cam = g.camera.frame(1600.0, 1000.0);
         (g, cam)
+    }
+
+    #[test]
+    fn every_planet_and_moon_gets_an_orbit_line() {
+        let (g, cam) = setup(Preset::SolarSystem);
+        let u = &g.universe;
+        let mut lines = Vec::new();
+        let mut on_orbit = Vec::new();
+        // From far enough out to see Neptune's orbit, the moons' are too small to draw.
+        orbit_lines(u, &cam, &mut lines, &mut on_orbit);
+        let id = |n: &str| u.bodies.iter().find(|b| b.name == n).unwrap().id;
+        assert!(!on_orbit.contains(&id("Sun")), "the Sun does not orbit Jupiter");
+        assert_eq!(on_orbit.len(), u.bodies.len() - 1, "everything else is in orbit");
+        // Two lines each (one faint all the way round, one fading behind the body).
+        let earth = u.get(id("Earth")).unwrap();
+        let line = lines.iter().find(|l| (l.points[0] - earth.pos).length() < 1e-6).expect("the Earth's orbit starts at the Earth");
+        for p in &line.points {
+            let d = p.length() / crate::units::AU;
+            assert!((0.98..1.02).contains(&d), "the Earth's orbit is a near-circle 1 AU from the Sun, not {d}");
+        }
+        assert!((line.points.last().unwrap() - earth.pos).length() < 1.0, "and it closes");
+        // What each thing goes round: the Moon the Earth (though the Sun pulls on it harder).
+        let around = |n: &str| u.dominant_attractor(u.get(id(n)).unwrap().pos, Some(id(n))).map(|i| u.bodies[i].name.clone());
+        assert_eq!(around("Moon").as_deref(), Some("Earth"));
+        assert_eq!(around("Earth").as_deref(), Some("Sun"));
+        assert_eq!(around("Charon").as_deref(), Some("Pluto"));
+        assert_eq!(around("Sun"), None);
+    }
+
+    #[test]
+    fn presets_are_to_scale_except_the_models() {
+        let mut g = Game::new();
+        for p in Preset::ALL {
+            g.load_preset(p);
+            assert_eq!(g.universe.real_scale, !matches!(p, Preset::GalaxyCollision | Preset::Protoplanetary), "{p:?}");
+            assert!(g.time_scale <= g.max_time_scale());
+            // The tools offer bodies of the right size for the scale.
+            assert_eq!(g.spawn.mass, g.spawn.kind.defaults(g.universe.real_scale).0, "{p:?}");
+            for b in g.universe.bodies.iter().filter(|b| b.kind == BodyKind::Star && p.real_scale()) {
+                assert!(b.radius > 0.5 * crate::units::SUN_RADIUS, "{p:?}: {} is too small to be a star", b.name);
+            }
+        }
+        // A model keeps the old plain speed limit; a real one can run at years a second.
+        g.load_preset(Preset::GalaxyCollision);
+        g.change_speed(1e9);
+        assert_eq!(g.time_scale, 1000.0);
+        g.load_preset(Preset::SolarSystem);
+        g.change_speed(1e9);
+        assert_eq!(g.time_scale, 10.0 * crate::units::YEAR);
+        // And the scale survives a save.
+        let bytes = g.save_bytes();
+        g.load_preset(Preset::GalaxyCollision);
+        g.load_bytes(&bytes).unwrap();
+        assert!(g.universe.real_scale);
     }
 
     #[test]
@@ -874,7 +1045,7 @@ mod tests {
         // auto-orbit gives roughly circular speed around the sun
         let r = b.pos.length();
         let v = b.vel.length();
-        assert!((v - (crate::presets::SUN_MASS / r).sqrt()).abs() / v < 0.25, "v={v} r={r}");
+        assert!((v - (crate::units::SUN_MASS / r).sqrt()).abs() / v < 0.25, "v={v} r={r}");
         assert_eq!(g.selected, Some(b.id));
     }
 

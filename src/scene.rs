@@ -9,7 +9,9 @@ use crate::gpu_types::*;
 use crate::settings::PlanetDetail;
 use crate::universe::{Universe, P_GLOW, P_HOT, P_IMMORTAL};
 
-pub struct SceneOptions {
+pub struct SceneOptions<'a> {
+    /// Bodies drawn with an orbit line, and so without a trail.
+    pub on_orbit: &'a [u64],
     pub trails: bool,
     pub exposure: f32,
     pub bloom: f32,
@@ -46,11 +48,12 @@ pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts:
     let mut lights: Vec<(Vec3, f32, Vec3)> = Vec::new(); // rel pos, radius, color*intensity
     for b in &u.bodies {
         if b.kind.is_luminous() {
-            lights.push((cam.rel(b.pos), b.radius as f32, b.light_color() * b.luminosity()));
+            lights.push((cam.rel(b.pos), b.radius as f32, b.light_color() * b.luminosity(u.real_scale)));
         }
     }
     for f in &u.flashes {
-        lights.push((cam.rel(f.pos), 1.0, f.color * f.intensity));
+        // A flash as big as a supernova's lights up worlds a long way off.
+        lights.push((cam.rel(f.pos), 1.0, f.color * f.intensity * (f.size / 300.0).max(1.0)));
     }
     lights.sort_by(|a, b| b.2.length_squared().total_cmp(&a.2.length_squared()));
     lights.truncate(MAX_LIGHTS);
@@ -60,6 +63,8 @@ pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts:
     for b in &u.bodies {
         let rel = cam.rel(b.pos);
         let px = cam.screen_radius(b.pos, b.radius);
+        // World units across one pixel, at the body's distance.
+        let pixel = rel.dot(cam.fwd).max(1e-4) * cam.tan_half * 2.0 / cam.size.y;
         let q = b.rotation();
         let highlight = if Some(b.id) == opts.selected {
             1.0
@@ -126,7 +131,9 @@ pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts:
             }
             BodyKind::Star => {
                 let c = b.light_color() * (1.2 + b.flash * 2.0);
-                let size = b.radius as f32 * (5.0 + b.flash * 6.0);
+                // From far enough away a star is smaller than a pixel (the Sun, seen from
+                // beyond Mars): it still shines, as a point of light of a fixed size.
+                let size = (b.radius as f32 * (5.0 + b.flash * 6.0)).max(pixel * 14.0);
                 particles.push(GpuParticle { pos_size: [rel.x, rel.y, rel.z, size], color: [c.x, c.y, c.z, 1.0] });
             }
             BodyKind::NeutronStar => {
@@ -134,6 +141,11 @@ pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts:
                 particles.push(GpuParticle { pos_size: [rel.x, rel.y, rel.z, b.radius as f32 * 30.0], color: [c.x, c.y, c.z, 1.0] });
             }
             _ => {
+                // A world too far off to cover a pixel is drawn as a dot of its own colour.
+                if px < 1.2 {
+                    let c = b.trail_color() * (0.55 + 0.45 * (b.radius as f32).min(1.0));
+                    particles.push(GpuParticle { pos_size: [rel.x, rel.y, rel.z, pixel * 1.7], color: [c.x, c.y, c.z, 0.0] });
+                }
                 if b.heat > 0.05 || b.flash > 0.05 {
                     let c = Vec3::new(1.0, 0.45, 0.15) * (b.heat * 0.2 + b.flash * 0.5);
                     particles.push(GpuParticle { pos_size: [rel.x, rel.y, rel.z, b.radius as f32 * 3.0], color: [c.x, c.y, c.z, 1.0] });
@@ -142,7 +154,7 @@ pub fn build_frame(frame: &mut FrameData, u: &Universe, cam: &CameraFrame, opts:
         }
 
         // ---- trails ----
-        if opts.trails && b.trail.len() > 1 && (!b.name.is_empty() || u.bodies.len() < 60) {
+        if opts.trails && b.trail.len() > 1 && (!b.name.is_empty() || u.bodies.len() < 60) && !opts.on_orbit.contains(&b.id) {
             let c = b.trail_color();
             let n = b.trail.len();
             let alpha_scale = if b.kind == BodyKind::BlackHole { 0.5 } else { 0.35 };

@@ -8,7 +8,7 @@ The project is fully vibe coded (the README says so). Every change is made by an
 
 ```sh
 cargo build --release          # always test and run release builds; debug is slow
-cargo test --release           # ~95 tests, ~15 s; CI runs `--locked`
+cargo test --release           # ~100 tests, ~25 s; CI runs `--locked`
 ./target/release/arthurs-universe-playground
 ```
 
@@ -22,7 +22,7 @@ Prefer checking UI and rendering changes in the actual app over guessing. The bi
 
 ```sh
 B=./target/release/arthurs-universe-playground
-$B --no-update-check --preset solar --focus Earth --zoom 9 --frames 90 --screenshot out.bmp
+$B --no-update-check --preset solar --focus Earth --zoom 9 --frames 120 --screenshot out.bmp
 $B --no-update-check --fly Earth --rocket 0 --hold z --frames 75 --screenshot fly.bmp
 $B --no-update-check --walk Mars --frames 90 --screenshot walk.bmp
 $B --no-update-check --preset galaxy --speed 30 --zoom 1000 --frames 220 --hide-ui --screenshot g.bmp
@@ -33,6 +33,7 @@ $B --no-update-check --preset galaxy --speed 30 --zoom 1000 --frames 220 --hide-
 - Screenshot runs don't read or write the user's settings or saves, and don't open a sound device. To test with particular settings, point `AUP_SETTINGS` at a scratch file (e.g. `{"labels": false}`); saves then go in a `saves` folder next to it. Never run tests against the real settings or saves.
 - Synthetic clicks are unreliable while another copy of the game is open (they fight over focus). Close the user's game first or expect flaky results.
 - `--hide-ui` still draws body labels and a "Press H" hint at the top; crop the top or turn labels off via `AUP_SETTINGS`.
+- `--zoom` is a distance in game units (1 AU = 46,962) and `--speed` a time scale (1 = 30 minutes a second, 48 = a day a second). After `--focus` allow about 120 frames for the camera to arrive.
 - Sim time per frame is not constant (adaptive sub-stepping); the log line `sim t=` tells you where a screenshot landed.
 - `sips` and ImageMagick (`magick`) are available for converting and composing images. There's no PIL.
 
@@ -51,7 +52,8 @@ $B --no-update-check --preset galaxy --speed 30 --zoom 1000 --frames 220 --hide-
 | `src/ui.rs`, `src/ui/hud.rs`, `src/ui/options.rs` | egui interface: bars, dock, tool cards, inspector, modals; flight/walk HUDs; Settings tabs |
 | `src/icons.rs` | Hand-drawn vector icon set on a 24x24 grid |
 | `src/renderer.rs`, `src/scene.rs`, `src/gpu_types.rs`, `shaders/*.wgsl` | Vulkan renderer. `build.rs` compiles WGSL to SPIR-V with naga and validates it at build time |
-| `src/presets.rs` | The preset universes and "Create your own universe" |
+| `src/presets.rs` | The preset universes (the Solar System's tables of real figures) and "Create your own universe" |
+| `src/units.rs` | Real-world units (km, seconds, masses from GM) and how distances, speeds, times and masses are worded |
 
 ## Conventions and traps
 
@@ -71,7 +73,17 @@ $B --no-update-check --preset galaxy --speed 30 --zoom 1000 --frames 220 --hide-
 
 **Sound**: to add an effect, add a `Sound` variant (`universe.rs`), push it with `universe.sound(...)` where it happens, map it in `sfx_for` and give it a `recipe` in `audio.rs`. Listen without playing: `AUP_DEMO_WAV=demo.wav cargo test --release demo_wav -- --ignored`. Keep impacts deep rather than hissy, and music bells sparse and soft (the user found them annoying when frequent).
 
+**Scale** (`src/units.rs`): universes are built to scale (`Universe::real_scale`) except the two models (Galaxy Collision, Protoplanetary Disk) and saves from before 1.5.
+- G = 1, one unit of length is half the Earth's radius (3185.5 km), one unit of time is 1800 s; masses come from real GM values via `units::mass`. So Earth has radius 2 and mass 39.95, the Sun radius 218 and mass 1.33e7, 1 AU = 46,962 units, a day = 48 and a year = 17,532 units of time. Build new presets with `units::au`, `km`, `mass`, `spin_rate` rather than bare numbers.
+- Anything scale-dependent takes the flag: `BodyKind::defaults(real)`, `black_hole_radius(mass, real)`, `Body::luminosity(real)`, the yardstick in `conditions.rs`, and the `units::fmt_*` functions (plain numbers in a model). `Universe::new` starts as a model (`real_scale = false`), which is what most physics tests use.
+- Drawn bigger than life on purpose: neutron stars and small black holes (`MIN_BLACK_HOLE_RADIUS`), rockets and astronauts (`explore::person_scale` shrinks the astronaut on tiny moons).
+- Planets are sub-pixel from afar. `scene.rs` draws far-off worlds as dots and keeps stars a fixed size on screen, `game.rs::orbit_lines` draws each named body's orbit (toggled with trails; a body with an orbit line gets no trail), and the particle shader never dims a sub-pixel particle below a tenth.
+- Particle positions are f32: fine to about Saturn's distance, grainy (0.1 unit) by Neptune's. Bodies and the rocket are f64.
+- The supernova scales its blast by the star's radius (`k` in `explode_star`). The Theia and Head-on scenes keep their hand-tuned (slightly large) worlds, lit by a real-size but nearly weightless `lamp_sun`.
+
 **Physics** (`src/universe.rs`):
+- The step length adapts (`longest_step`): at most `STEP_ORBIT_FRACTION` of the tightest orbit's timescale and `STEP_APPROACH_FRACTION` of the time for any two bodies to meet, rounded down to a power of two, never below the old fixed 0.05, and 0.05 while a rocket is flying. Up to `FINE_STEPS` steps a frame are taken at `base_dt` first; the Theia preset's outcome is sensitive to that number.
+- "What does this orbit?" is `dominant_attractor`: strongest tidal grip (mass / distance³), not strongest pull, or the Moon would be said to orbit the Sun.
 - Particles can carry `mass` (rubble from a smash, a shredded world's stream; zero for decoration and galaxy stars). A body that swallows one gains its mass and momentum, so when a collision turns mass into dust, hand it over with `give_mass_to_newest` rather than dropping it. Collision tests check that mass and momentum add up, dust included.
 - A glancing hit goes through `graze` first: it works out which part of the smaller world is in the way (that part merges or shatters as usual) and which part sails past as a slowed "remnant" shedding pieces. Nothing is placed in orbit by hand; `name_new_moons` only labels a leftover that gravity has left circling. Whether a moon results depends on the hit and on chance (about half the time in the best case), so the Theia preset fixes its seed. When judging anything random like this, sweep many seeds, not one.
 - Work per frame is capped: `pair_budget` for bodies (tuned to the computer by `Game::tune_physics`, only when `physics_budget` is set, so tests and screenshot runs stay repeatable) and `PARTICLE_WORK` for particles. Check the cost of physics changes with many bodies at 100x, not just the presets at 1x.

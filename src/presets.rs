@@ -2,7 +2,8 @@
 
 use glam::{DQuat, DVec3, Vec3};
 
-use crate::body::{black_hole_radius, BodyKind};
+use crate::body::{black_hole_radius, BodyKind, Ring};
+use crate::units::{self, au, km, AU, DAY, SUN_MASS, SUN_RADIUS};
 use crate::universe::{Universe, P_GRAVITY, P_IMMORTAL};
 use crate::util::Rng;
 
@@ -47,18 +48,37 @@ impl Preset {
             Preset::Empty => "Empty Universe",
         }
     }
+    /// Built to scale, in real units (see `units.rs`)? The galaxies and the
+    /// protoplanetary disk are models: at their true size and pace there would be
+    /// nothing to watch in a lifetime.
+    pub fn real_scale(self) -> bool {
+        !matches!(self, Preset::GalaxyCollision | Preset::Protoplanetary)
+    }
     pub fn camera_distance(self) -> f64 {
         match self {
-            Preset::SolarSystem => 2600.0,
-            Preset::RogueBlackHole => 7500.0,
+            Preset::SolarSystem => au(7.0),
+            Preset::RogueBlackHole => au(20.0),
             Preset::TheiaImpact => 60.0,
             Preset::HeadOn => 70.0,
-            Preset::BinaryStars => 2200.0,
-            Preset::BlackHoleFeast => 260.0,
-            Preset::Supernova => 520.0,
+            Preset::BinaryStars => au(9.0),
+            Preset::BlackHoleFeast => 30.0 * GARGANTUA_RADIUS,
+            Preset::Supernova => au(3.2),
             Preset::GalaxyCollision => 1300.0,
             Preset::Protoplanetary => 380.0,
-            Preset::Empty => 200.0,
+            Preset::Empty => 3000.0,
+        }
+    }
+    /// How fast time runs when the preset starts.
+    pub fn time_scale(self) -> f64 {
+        match self {
+            // A week every second: the Earth goes round the Sun in under a minute.
+            Preset::SolarSystem | Preset::RogueBlackHole | Preset::BinaryStars => 7.0 * DAY,
+            // Things near a giant black hole move at a good part of the speed of light.
+            Preset::BlackHoleFeast => 0.2,
+            Preset::Supernova => 4.0,
+            Preset::GalaxyCollision => 6.0,
+            Preset::Protoplanetary => 5.0,
+            Preset::TheiaImpact | Preset::HeadOn | Preset::Empty => 1.0,
         }
     }
 }
@@ -92,20 +112,92 @@ fn add_orbiting(
     u.add(b)
 }
 
+/// The shape and tilt of a real orbit, as astronomers list it. Angles in degrees.
+#[derive(Clone, Copy)]
+struct Orbit {
+    /// Half the long axis of the ellipse (game units).
+    a: f64,
+    /// Eccentricity: 0 is a circle.
+    e: f64,
+    /// Tilt of the orbit against the reference plane.
+    incl: f64,
+    /// Longitude of the ascending node: where the orbit crosses the plane going up.
+    node: f64,
+    /// Longitude of the closest point (node + argument of periapsis).
+    peri: f64,
+    /// Mean longitude: where along the orbit the body is.
+    longitude: f64,
+}
+
+impl Orbit {
+    /// Position and velocity on the orbit, relative to what it goes round, where `mu`
+    /// is G times the two masses together. The reference plane is the world's XZ
+    /// plane with +Y as north, and things go round anticlockwise seen from the north,
+    /// like everything (nearly) in the Solar System.
+    fn state(&self, mu: f64) -> (DVec3, DVec3) {
+        let (node, incl) = (self.node.to_radians(), self.incl.to_radians());
+        let arg = (self.peri - self.node).to_radians();
+        let mean = (self.longitude - self.peri).to_radians();
+        // Kepler's equation, by Newton's method.
+        let mut ecc = mean;
+        for _ in 0..30 {
+            ecc -= (ecc - self.e * ecc.sin() - mean) / (1.0 - self.e * ecc.cos());
+        }
+        let (se, ce) = ecc.sin_cos();
+        let b = (1.0 - self.e * self.e).sqrt();
+        let rate = (mu / self.a.powi(3)).sqrt();
+        // In the plane of the orbit, x towards the closest point.
+        let (x, y) = (self.a * (ce - self.e), self.a * b * se);
+        let k = self.a * rate / (1.0 - self.e * ce);
+        let (vx, vy) = (-k * se, k * b * ce);
+        let (sn, cn) = node.sin_cos();
+        let (sa, ca) = arg.sin_cos();
+        let (si, ci) = incl.sin_cos();
+        // Columns of the usual rotation (node, then tilt, then argument), in
+        // ecliptic-style axes: x, y in the plane and z north.
+        let px = DVec3::new(cn * ca - sn * sa * ci, sn * ca + cn * sa * ci, sa * si);
+        let py = DVec3::new(-cn * sa - sn * ca * ci, -sn * sa + cn * ca * ci, ca * si);
+        let world = |v: DVec3| DVec3::new(v.x, v.z, -v.y);
+        (world(px * x + py * y), world(px * vx + py * vy))
+    }
+}
+
+/// Add a body on `orbit` around `parent`. `frame` turns the reference plane: the
+/// identity for an orbit listed against the plane of the Solar System, or the
+/// parent's own tilt for a moon that goes round its equator. A heavy moon (ours,
+/// Charon) and its planet are both set going round the point between them.
+#[allow(clippy::too_many_arguments)]
+fn add_on_orbit(u: &mut Universe, parent: u64, frame: DQuat, name: &str, kind: BodyKind, mass: f64, radius: f64, orbit: Orbit) -> u64 {
+    let p = u.get(parent).expect("parent");
+    let (ppos, pvel, pmass) = (p.pos, p.vel, p.mass);
+    let (r, v) = orbit.state(u.g * (pmass + mass));
+    let (r, v) = (frame * r, frame * v);
+    let share = mass / (pmass + mass);
+    let share = if share > 1e-3 { share } else { 0.0 };
+    if let Some(p) = u.get_mut(parent) {
+        p.pos -= r * share;
+        p.vel -= v * share;
+    }
+    let b = u.new_body(name, kind, ppos + r * (1.0 - share), pvel + v * (1.0 - share)).with_mass_radius(mass, radius);
+    u.add(b)
+}
+
+/// The turn that takes "straight up" to a body's spin axis: the frame of its equator.
+fn equator(u: &Universe, id: u64) -> DQuat {
+    let axis = u.get(id).expect("body").axis().as_dvec3();
+    DQuat::from_rotation_arc(DVec3::Y, axis)
+}
+
 fn zero_momentum(u: &mut Universe) {
     let (mut p, mut m) = (DVec3::ZERO, 0.0);
-    let (mut c, mut mc) = (DVec3::ZERO, 0.0);
     for b in &u.bodies {
         p += b.vel * b.mass;
         m += b.mass;
-        c += b.pos * b.mass;
-        mc += b.mass;
     }
     if m <= 0.0 {
         return;
     }
     let v = p / m;
-    let _com = c / mc;
     for b in &mut u.bodies {
         b.vel -= v;
     }
@@ -116,7 +208,9 @@ fn zero_momentum(u: &mut Universe) {
     }
 }
 
-fn asteroid_belt(u: &mut Universe, center: DVec3, center_vel: DVec3, mass: f64, r0: f64, r1: f64, count: usize, color: Vec3) {
+/// A ring of `count` specks in circular orbits between `r0` and `r1`, each `size` across (give or take).
+#[allow(clippy::too_many_arguments)]
+fn asteroid_belt(u: &mut Universe, center: DVec3, center_vel: DVec3, mass: f64, r0: f64, r1: f64, count: usize, color: Vec3, size: f32) {
     for _ in 0..count {
         let r = u.rng.range(r0, r1);
         let a = u.rng.range(0.0, std::f64::consts::TAU);
@@ -125,9 +219,7 @@ fn asteroid_belt(u: &mut Universe, center: DVec3, center_vel: DVec3, mass: f64, 
         let speed = (u.g * mass / r).sqrt() * u.rng.range(0.98, 1.02);
         let dir = DVec3::Y.cross(pos - center).normalize();
         let tint = color * u.rng.rangef(0.5, 1.2);
-        // Bigger belts get bigger "rocks" so they stay visible from afar.
-        let size = u.rng.rangef(0.15, 0.45) * (r0 / 150.0).sqrt() as f32;
-        u.emit(pos, center_vel + dir * speed, tint, size, 1.0, P_GRAVITY | P_IMMORTAL);
+        u.emit(pos, center_vel + dir * speed, tint, size * u.rng.rangef(0.5, 1.5), 1.0, P_GRAVITY | P_IMMORTAL);
     }
 }
 
@@ -142,16 +234,19 @@ pub fn build(u: &mut Universe, preset: Preset) {
 
 fn build_bodies(u: &mut Universe, preset: Preset) {
     u.reset(preset.label());
+    u.real_scale = preset.real_scale();
     u.g = 1.0;
     match preset {
         Preset::SolarSystem => solar_system(u),
         Preset::RogueBlackHole => {
             solar_system(u);
-            let start = DVec3::new(6000.0, 150.0, 3900.0);
-            let aim = DVec3::new(250.0, 0.0, -350.0);
-            let mut bh = u.new_body("Rogue Black Hole", BodyKind::BlackHole, start, (aim - start).normalize() * 22.0);
-            bh.mass = 300_000.0;
-            bh.radius = black_hole_radius(bh.mass);
+            // Ten times the mass of the Sun, coming in at 60 km/s to pass between the
+            // Sun and the Earth. Its pull is felt across the whole inner Solar System.
+            let start = DVec3::new(au(10.5), au(0.26), au(6.8));
+            let aim = DVec3::new(au(0.58), 0.0, au(-0.81));
+            let mut bh = u.new_body("Rogue Black Hole", BodyKind::BlackHole, start, (aim - start).normalize() * (60.0 / units::KM_PER_S));
+            bh.mass = 10.0 * SUN_MASS;
+            bh.radius = black_hole_radius(bh.mass, true);
             u.add(bh);
             u.event("A rogue black hole is heading for the Solar System...");
         }
@@ -171,109 +266,160 @@ fn build_bodies(u: &mut Universe, preset: Preset) {
     }
 }
 
-/// Mass of the Sun in the Solar System preset.
-///
-/// The Solar System is built to be dynamically stable:
-/// * planets are spaced at (roughly) real distance ratios so neighbours sit
-///   ~7-13 mutual Hill radii apart (real systems are stable above ~8; below ~3.5
-///   orbits go chaotic within a few dozen orbits),
-/// * every moon orbits inside ~0.3 of its planet's Hill radius r_H = a (m / 3M)^(1/3)
-///   (prograde moons get stripped by the Sun's tide beyond ~0.4-0.5 r_H),
-/// * terrestrial planets are ~30x heavier relative to the Sun than in reality so
-///   the Moon can sit close to Earth, giants keep their real mass ratios,
-/// * moon masses are realistic fractions of their planets so moons don't
-///   destabilise each other.
-pub const SUN_MASS: f64 = 400_000.0;
+/// One line of the table of planets. Sizes and masses are NASA's (the planetary
+/// fact sheets and JPL's physical parameters); the orbits are JPL's "approximate
+/// positions of the planets" for the year 2000, so every planet starts where it
+/// really was on 1 January 2000, on its real, slightly oval and slightly tilted path.
+struct Planet {
+    name: &'static str,
+    kind: BodyKind,
+    /// G times the mass, km³/s².
+    gm: f64,
+    /// Mean radius, km.
+    radius: f64,
+    /// Semi-major axis in AU, eccentricity, inclination, mean longitude, longitude
+    /// of perihelion and longitude of the ascending node (degrees).
+    orbit: [f64; 6],
+    /// Hours for one turn on its axis, and the tilt of that axis in degrees
+    /// (more than 90 means it spins backwards, like Venus).
+    day: f64,
+    tilt: f64,
+}
 
+#[rustfmt::skip]
+const PLANETS: [Planet; 11] = [
+    Planet { name: "Mercury", kind: BodyKind::Rocky,     gm: 22_031.87,       radius: 2439.4,   orbit: [0.38709927, 0.20563593, 7.00497902, 252.25032350, 77.45779628, 48.33076593],     day: 1407.6,  tilt: 0.034 },
+    Planet { name: "Venus",   kind: BodyKind::Cloudy,    gm: 324_858.59,      radius: 6051.8,   orbit: [0.72333566, 0.00677672, 3.39467605, 181.97909950, 131.60246718, 76.67984255],    day: 5832.5,  tilt: 177.36 },
+    Planet { name: "Earth",   kind: BodyKind::Earthlike, gm: 398_600.44,    radius: 6371.0,   orbit: [1.00000261, 0.01671123, -0.00001531, 100.46457166, 102.93768193, 0.0],           day: 23.9345, tilt: 23.44 },
+    Planet { name: "Mars",    kind: BodyKind::Desert,    gm: 42_828.37,       radius: 3389.5,   orbit: [1.52371034, 0.09339410, 1.84969142, -4.55343205, -23.94362959, 49.55953891],     day: 24.6229, tilt: 25.19 },
+    Planet { name: "Vesta",   kind: BodyKind::Asteroid,  gm: 17.29,           radius: 262.7,    orbit: [2.3618, 0.0887, 7.14, 275.9, 255.05, 103.85],                                    day: 5.342,   tilt: 29.0 },
+    Planet { name: "Ceres",   kind: BodyKind::Rocky,     gm: 62.63,           radius: 469.7,    orbit: [2.7675, 0.0758, 10.59, 231.3, 153.9, 80.33],                                     day: 9.074,   tilt: 4.0 },
+    Planet { name: "Jupiter", kind: BodyKind::GasGiant,  gm: 126_686_531.9,   radius: 69_911.0, orbit: [5.20288700, 0.04838624, 1.30439695, 34.39644051, 14.72847983, 100.47390909],     day: 9.925,   tilt: 3.13 },
+    Planet { name: "Saturn",  kind: BodyKind::GasGiant,  gm: 37_931_206.2,    radius: 58_232.0, orbit: [9.53667594, 0.05386179, 2.48599187, 49.95424423, 92.59887831, 113.66242448],     day: 10.656,  tilt: 26.73 },
+    Planet { name: "Uranus",  kind: BodyKind::IceGiant,  gm: 5_793_951.3,     radius: 25_362.0, orbit: [19.18916464, 0.04725744, 0.77263783, 313.23810451, 170.95427630, 74.01692503],   day: 17.24,   tilt: 97.77 },
+    Planet { name: "Neptune", kind: BodyKind::IceGiant,  gm: 6_835_099.5,     radius: 24_622.0, orbit: [30.06992276, 0.00859048, 1.77004347, -55.12002969, 44.96476227, 131.78422574],   day: 16.11,   tilt: 28.32 },
+    Planet { name: "Pluto",   kind: BodyKind::Ice,       gm: 869.6,           radius: 1188.3,   orbit: [39.48211675, 0.24882730, 17.14001206, 238.92903833, 224.06891629, 110.30393684], day: 153.29,  tilt: 122.53 },
+];
+
+/// One line of the table of moons (JPL's satellite parameters and mean elements).
+struct Moon {
+    planet: &'static str,
+    name: &'static str,
+    kind: BodyKind,
+    /// G times the mass, km³/s², and mean radius, km.
+    gm: f64,
+    radius: f64,
+    /// Semi-major axis (km), eccentricity and inclination (degrees) to the planet's
+    /// equator; or to the plane of the Solar System for our own Moon.
+    a: f64,
+    e: f64,
+    incl: f64,
+}
+
+#[rustfmt::skip]
+const MOONS: [Moon; 21] = [
+    Moon { planet: "Earth",   name: "Moon",      kind: BodyKind::Rocky,    gm: 4902.800,    radius: 1737.4,  a: 384_400.0,   e: 0.0554, incl: 5.16 },
+    Moon { planet: "Mars",    name: "Phobos",    kind: BodyKind::Asteroid, gm: 0.0007087,   radius: 11.08,   a: 9375.0,      e: 0.015,  incl: 1.1 },
+    Moon { planet: "Mars",    name: "Deimos",    kind: BodyKind::Asteroid, gm: 0.0000962,   radius: 6.2,     a: 23_457.0,    e: 0.0,    incl: 1.8 },
+    Moon { planet: "Jupiter", name: "Io",        kind: BodyKind::Lava,     gm: 5959.91547,  radius: 1821.49, a: 421_800.0,   e: 0.004,  incl: 0.0 },
+    Moon { planet: "Jupiter", name: "Europa",    kind: BodyKind::Ice,      gm: 3202.71210,  radius: 1560.80, a: 671_100.0,   e: 0.009,  incl: 0.5 },
+    Moon { planet: "Jupiter", name: "Ganymede",  kind: BodyKind::Rocky,    gm: 9887.83275,  radius: 2631.20, a: 1_070_400.0, e: 0.001,  incl: 0.2 },
+    Moon { planet: "Jupiter", name: "Callisto",  kind: BodyKind::Rocky,    gm: 7179.28340,  radius: 2410.30, a: 1_882_700.0, e: 0.007,  incl: 0.3 },
+    Moon { planet: "Saturn",  name: "Mimas",     kind: BodyKind::Ice,      gm: 2.50349,     radius: 198.20,  a: 186_000.0,   e: 0.020,  incl: 1.6 },
+    Moon { planet: "Saturn",  name: "Enceladus", kind: BodyKind::Ice,      gm: 7.21037,     radius: 252.10,  a: 238_400.0,   e: 0.005,  incl: 0.0 },
+    Moon { planet: "Saturn",  name: "Tethys",    kind: BodyKind::Ice,      gm: 41.21353,    radius: 531.10,  a: 295_000.0,   e: 0.001,  incl: 1.1 },
+    Moon { planet: "Saturn",  name: "Dione",     kind: BodyKind::Ice,      gm: 73.11607,    radius: 561.40,  a: 377_700.0,   e: 0.002,  incl: 0.0 },
+    Moon { planet: "Saturn",  name: "Rhea",      kind: BodyKind::Ice,      gm: 153.94175,   radius: 763.50,  a: 527_200.0,   e: 0.001,  incl: 0.3 },
+    Moon { planet: "Saturn",  name: "Titan",     kind: BodyKind::Cloudy,   gm: 8978.13710,  radius: 2574.76, a: 1_221_900.0, e: 0.029,  incl: 0.3 },
+    Moon { planet: "Saturn",  name: "Iapetus",   kind: BodyKind::Rocky,    gm: 120.51511,   radius: 734.30,  a: 3_561_700.0, e: 0.028,  incl: 15.5 },
+    Moon { planet: "Uranus",  name: "Miranda",   kind: BodyKind::Ice,      gm: 4.3,         radius: 235.8,   a: 129_846.0,   e: 0.001,  incl: 4.4 },
+    Moon { planet: "Uranus",  name: "Ariel",     kind: BodyKind::Ice,      gm: 83.5,        radius: 578.9,   a: 190_929.0,   e: 0.001,  incl: 0.0 },
+    Moon { planet: "Uranus",  name: "Umbriel",   kind: BodyKind::Rocky,    gm: 85.1,        radius: 584.7,   a: 265_986.0,   e: 0.004,  incl: 0.1 },
+    Moon { planet: "Uranus",  name: "Titania",   kind: BodyKind::Ice,      gm: 226.9,       radius: 788.9,   a: 436_298.0,   e: 0.002,  incl: 0.1 },
+    Moon { planet: "Uranus",  name: "Oberon",    kind: BodyKind::Rocky,    gm: 205.3,       radius: 761.4,   a: 583_511.0,   e: 0.002,  incl: 0.1 },
+    // Triton goes round Neptune backwards.
+    Moon { planet: "Neptune", name: "Triton",    kind: BodyKind::Ice,      gm: 1428.49546,  radius: 1352.60, a: 354_800.0,   e: 0.0,    incl: 157.3 },
+    Moon { planet: "Pluto",   name: "Charon",    kind: BodyKind::Rocky,    gm: 106.1,       radius: 606.0,   a: 19_591.0,    e: 0.0,    incl: 0.0 },
+];
+
+/// The Solar System, to scale: every size, mass, distance, orbit, day and tilt is
+/// the real one, so every year and month comes out right too. (What is not real:
+/// which way each axis leans, and where each moon is along its orbit.)
 pub fn solar_system(u: &mut Universe) {
-    let sun = u.new_body("Sun", BodyKind::Star, DVec3::ZERO, DVec3::ZERO).with_mass_radius(SUN_MASS, 16.0).with_temperature(5800.0);
+    let mut sun = u.new_body("Sun", BodyKind::Star, DVec3::ZERO, DVec3::ZERO).with_mass_radius(SUN_MASS, SUN_RADIUS).with_temperature(units::SUN_TEMPERATURE);
+    sun.spin_rate = units::spin_rate(609.12);
+    sun.tilt = 7.25f32.to_radians();
     let sun = u.add(sun);
-    let ang = |i: u32| (i as f64 * 2.39996) % std::f64::consts::TAU; // golden angle spread
 
-    // Distances: Earth = 430 units; inner planets at real ratios, outer giants gently compressed.
-    let id = add_orbiting(u, sun, "Mercury", BodyKind::Rocky, 2.2, 0.9, 166.0, ang(1), 0.05);
-    if let Some(b) = u.get_mut(id) {
-        b.surface.colors = [Vec3::new(0.5, 0.47, 0.44), Vec3::new(0.32, 0.3, 0.28), Vec3::ONE];
-        b.spin_rate = 0.05;
-    }
-    let id = add_orbiting(u, sun, "Venus", BodyKind::Cloudy, 32.0, 1.9, 311.0, ang(2), 0.03);
-    if let Some(b) = u.get_mut(id) {
-        b.spin_rate = -0.02;
-    }
-    let earth = add_orbiting(u, sun, "Earth", BodyKind::Earthlike, 40.0, 2.0, 430.0, ang(3), 0.0);
-    if let Some(b) = u.get_mut(earth) {
-        b.tilt = 0.41;
-        b.spin_rate = 0.5;
-        b.surface.seed = 3.3;
-    }
-    // r_H(Earth) ~ 13.8 -> Moon at 0.29 r_H
-    add_orbiting(u, earth, "Moon", BodyKind::Rocky, 0.5, 0.55, 4.0, 0.0, 0.09);
-    let mars = add_orbiting(u, sun, "Mars", BodyKind::Desert, 4.3, 1.4, 655.0, ang(4), 0.03);
-    if let Some(b) = u.get_mut(mars) {
-        b.tilt = 0.44;
-    }
-    // r_H(Mars) ~ 10
-    add_orbiting(u, mars, "Phobos", BodyKind::Asteroid, 0.002, 0.22, 2.3, 0.0, 0.0);
-    add_orbiting(u, mars, "Deimos", BodyKind::Asteroid, 0.001, 0.16, 3.0, 2.0, 0.0);
-
-    // Main belt between Mars and Jupiter (2.2-3.1 AU equivalent), clear of Jupiter's chaotic zone.
-    asteroid_belt(u, DVec3::ZERO, DVec3::ZERO, SUN_MASS, 950.0, 1330.0, 3000, Vec3::new(0.55, 0.5, 0.45) * 1.8);
-    add_orbiting(u, sun, "Ceres", BodyKind::Rocky, 0.004, 0.5, 1190.0, ang(9), 0.1);
-    add_orbiting(u, sun, "Vesta", BodyKind::Asteroid, 0.001, 0.4, 1015.0, ang(10), 0.12);
-
-    // Jupiter: real mass ratio (1e-3), r_H ~ 118
-    let jup = add_orbiting(u, sun, "Jupiter", BodyKind::GasGiant, 400.0, 6.0, 1700.0, ang(5), 0.02);
-    if let Some(b) = u.get_mut(jup) {
-        b.surface.colors = [Vec3::new(0.87, 0.75, 0.6), Vec3::new(0.62, 0.38, 0.22), Vec3::new(0.95, 0.92, 0.86)];
-        b.tilt = 0.05;
-        b.spin_rate = 1.0;
-        b.surface.seed = 1.0;
-    }
-    let io = add_orbiting(u, jup, "Io", BodyKind::Lava, 0.02, 0.6, 9.0, 0.0, 0.0);
-    if let Some(b) = u.get_mut(io) {
-        b.surface.colors = [Vec3::new(0.75, 0.65, 0.2), Vec3::new(0.4, 0.2, 0.05), Vec3::ONE];
-    }
-    add_orbiting(u, jup, "Europa", BodyKind::Ice, 0.012, 0.5, 11.5, 1.7, 0.0);
-    add_orbiting(u, jup, "Ganymede", BodyKind::Rocky, 0.03, 0.75, 14.5, 3.3, 0.0);
-    add_orbiting(u, jup, "Callisto", BodyKind::Rocky, 0.02, 0.7, 18.5, 4.6, 0.0);
-
-    let sat = add_orbiting(u, sun, "Saturn", BodyKind::GasGiant, 120.0, 5.0, 2975.0, ang(6), 0.04);
-    if let Some(b) = u.get_mut(sat) {
-        b.surface.colors = [Vec3::new(0.9, 0.82, 0.6), Vec3::new(0.75, 0.62, 0.4), Vec3::new(0.95, 0.9, 0.75)];
-        b.tilt = 0.47;
-        b.spin_rate = 0.9;
-        b.ring = Some(crate::body::Ring { inner: 6.5, outer: 11.5, color: Vec3::new(0.85, 0.78, 0.62), opacity: 0.9 });
-    }
-    let titan = add_orbiting(u, sat, "Titan", BodyKind::Cloudy, 0.03, 0.75, 15.0, 0.5, 0.0);
-    if let Some(b) = u.get_mut(titan) {
-        b.surface.colors = [Vec3::new(0.85, 0.55, 0.2), Vec3::new(0.7, 0.45, 0.15), Vec3::ONE];
+    for p in &PLANETS {
+        let [a, e, incl, longitude, peri, node] = p.orbit;
+        let orbit = Orbit { a: au(a), e, incl, node, peri, longitude };
+        let id = add_on_orbit(u, sun, DQuat::IDENTITY, p.name, p.kind, units::mass(p.gm), km(p.radius), orbit);
+        let b = u.get_mut(id).expect("planet");
+        b.spin_rate = units::spin_rate(p.day);
+        b.tilt = (p.tilt as f32).to_radians();
+        match p.name {
+            "Mercury" => b.surface.colors = [Vec3::new(0.5, 0.47, 0.44), Vec3::new(0.32, 0.3, 0.28), Vec3::ONE],
+            "Earth" => b.surface.seed = 3.3,
+            "Jupiter" => {
+                b.surface.colors = [Vec3::new(0.87, 0.75, 0.6), Vec3::new(0.62, 0.38, 0.22), Vec3::new(0.95, 0.92, 0.86)];
+                b.surface.seed = 1.0;
+            }
+            "Saturn" => {
+                b.surface.colors = [Vec3::new(0.9, 0.82, 0.6), Vec3::new(0.75, 0.62, 0.4), Vec3::new(0.95, 0.9, 0.75)];
+                // From the inner edge of the C ring to the outer edge of the A ring.
+                b.ring = Some(Ring { inner: km(74_500.0) as f32, outer: km(136_780.0) as f32, color: Vec3::new(0.85, 0.78, 0.62), opacity: 0.9 });
+            }
+            "Uranus" => {
+                b.surface.colors = [Vec3::new(0.6, 0.85, 0.9), Vec3::new(0.5, 0.78, 0.85), Vec3::ONE];
+                b.ring = Some(Ring { inner: km(41_837.0) as f32, outer: km(51_149.0) as f32, color: Vec3::new(0.6, 0.65, 0.7), opacity: 0.4 });
+            }
+            "Neptune" => b.surface.colors = [Vec3::new(0.25, 0.42, 0.9), Vec3::new(0.15, 0.3, 0.75), Vec3::ONE],
+            "Pluto" => b.surface.colors = [Vec3::new(0.85, 0.75, 0.65), Vec3::new(0.55, 0.35, 0.25), Vec3::ONE],
+            _ => {}
+        }
     }
 
-    let ura = add_orbiting(u, sun, "Uranus", BodyKind::IceGiant, 17.0, 3.3, 4760.0, ang(7), 0.01);
-    if let Some(b) = u.get_mut(ura) {
-        b.tilt = 1.71;
-        b.surface.colors = [Vec3::new(0.6, 0.85, 0.9), Vec3::new(0.5, 0.78, 0.85), Vec3::ONE];
-        b.ring = Some(crate::body::Ring { inner: 4.6, outer: 5.4, color: Vec3::new(0.6, 0.65, 0.7), opacity: 0.4 });
+    for (k, m) in MOONS.iter().enumerate() {
+        let planet = u.bodies.iter().find(|b| b.name == m.planet).expect("planet").id;
+        // Our Moon's orbit is listed against the plane of the Solar System; the others go round their planet's equator.
+        let frame = if m.name == "Moon" { DQuat::IDENTITY } else { equator(u, planet) };
+        // Spread around their orbits by the golden angle.
+        let longitude = (k as f64 * 137.508) % 360.0;
+        let orbit = Orbit { a: km(m.a), e: m.e, incl: m.incl, node: 0.0, peri: longitude * 0.37, longitude };
+        let mass = units::mass(m.gm);
+        let id = add_on_orbit(u, planet, frame, m.name, m.kind, mass, km(m.radius), orbit);
+        let (pmass, ptilt) = u.get(planet).map(|p| (p.mass, p.tilt)).expect("planet");
+        // Every one of these moons keeps the same face to its planet: one turn per orbit.
+        let month = std::f64::consts::TAU * (km(m.a).powi(3) / (u.g * (pmass + mass))).sqrt();
+        let b = u.get_mut(id).expect("moon");
+        b.spin_rate = std::f64::consts::TAU / month;
+        b.tilt = if m.name == "Moon" { 1.54f32.to_radians() } else { ptilt };
+        match m.name {
+            "Io" => b.surface.colors = [Vec3::new(0.75, 0.65, 0.2), Vec3::new(0.4, 0.2, 0.05), Vec3::ONE],
+            "Titan" => b.surface.colors = [Vec3::new(0.85, 0.55, 0.2), Vec3::new(0.7, 0.45, 0.15), Vec3::ONE],
+            // Pluto always shows Charon the same face, too.
+            "Charon" => u.get_mut(planet).expect("Pluto").spin_rate = std::f64::consts::TAU / month,
+            _ => {}
+        }
     }
-    let nep = add_orbiting(u, sun, "Neptune", BodyKind::IceGiant, 20.0, 3.2, 6660.0, ang(8), 0.03);
-    if let Some(b) = u.get_mut(nep) {
-        b.surface.colors = [Vec3::new(0.25, 0.42, 0.9), Vec3::new(0.15, 0.3, 0.75), Vec3::ONE];
-    }
-    let (pos, vel) = orbit_around(u, nep, 6.0, 0.0, 0.4, true);
-    let triton = u.new_body("Triton", BodyKind::Ice, pos, vel).with_mass_radius(0.01, 0.5);
-    u.add(triton);
-    let pluto = add_orbiting(u, sun, "Pluto", BodyKind::Ice, 0.005, 0.4, 8700.0, ang(11), 0.3);
-    if let Some(b) = u.get_mut(pluto) {
-        b.surface.colors = [Vec3::new(0.85, 0.75, 0.65), Vec3::new(0.55, 0.35, 0.25), Vec3::ONE];
-        b.vel *= 0.93; // a bit eccentric
-    }
+
+    // The main asteroid belt, between Mars and Jupiter.
+    asteroid_belt(u, DVec3::ZERO, DVec3::ZERO, SUN_MASS, au(2.1), au(3.3), 3000, Vec3::new(0.55, 0.5, 0.45) * 1.8, 0.3);
     zero_momentum(u);
-    u.event("Welcome to the Solar System! Select a planet, terraform it, or smash something into it.");
+    u.event("Welcome to the Solar System, at its real size! Zoom in on a planet to see it.");
+}
+
+/// A far-off Sun to light a close-up scene: the real size at the real distance, but
+/// almost weightless, so that it does not drag the worlds in the scene towards it.
+fn lamp_sun(u: &mut Universe, name: &str, direction: DVec3, temperature: f32) -> u64 {
+    let mut sun = u.new_body(name, BodyKind::Star, direction.normalize() * AU, DVec3::ZERO).with_mass_radius(5.0, SUN_RADIUS).with_temperature(temperature);
+    sun.spin_rate = units::spin_rate(609.12);
+    u.add(sun)
 }
 
 fn theia(u: &mut Universe) {
-    let sun = u.new_body("Sun", BodyKind::Star, DVec3::new(-400.0, 30.0, -300.0), DVec3::ZERO).with_mass_radius(10000.0, 12.0).with_temperature(5800.0);
-    let sun_id = u.add(sun);
+    let sun_id = lamp_sun(u, "Sun", DVec3::new(-400.0, 30.0, -300.0), units::SUN_TEMPERATURE);
     let mut earth = u.new_body("Proto-Earth", BodyKind::Earthlike, DVec3::ZERO, DVec3::ZERO).with_mass_radius(60.0, 2.6);
     earth.surface.clouds = 0.5;
     earth.surface.sea_level = -0.2;
@@ -284,10 +430,6 @@ fn theia(u: &mut Universe) {
     let mut theia = u.new_body("Theia", BodyKind::Desert, DVec3::new(32.0, 0.5, 5.85), DVec3::new(-4.25, 0.0, 0.0)).with_mass_radius(14.0, 1.7);
     theia.surface.colors = [Vec3::new(0.5, 0.35, 0.3), Vec3::new(0.3, 0.2, 0.15), Vec3::ONE];
     u.add(theia);
-    // The sun is far away and very massive: keep it from pulling the pair apart by making it static-ish.
-    if let Some(s) = u.get_mut(sun_id) {
-        s.mass = 50.0; // a distant lamp; real gravity would dominate the scene
-    }
     // Put the pair's shared centre of mass at rest in the middle of the view, so the
     // wreckage (and the moon that forms in it) stays on screen instead of drifting off.
     let pair: Vec<usize> = u.bodies.iter().enumerate().filter(|(_, b)| b.id != sun_id).map(|(i, _)| i).collect();
@@ -306,9 +448,7 @@ fn theia(u: &mut Universe) {
 }
 
 fn head_on(u: &mut Universe) {
-    let mut sun = u.new_body("Distant Sun", BodyKind::Star, DVec3::new(-300.0, 150.0, 200.0), DVec3::ZERO).with_mass_radius(5.0, 12.0).with_temperature(6200.0);
-    sun.spin_rate = 0.05;
-    u.add(sun);
+    lamp_sun(u, "Distant Sun", DVec3::new(-300.0, 150.0, 200.0), 6200.0);
     let a = u.new_body("Aqua", BodyKind::Earthlike, DVec3::new(-28.0, 0.0, 0.0), DVec3::new(7.5, 0.0, 0.0)).with_mass_radius(45.0, 2.4);
     u.add(a);
     let mut b = u.new_body("Ember", BodyKind::Lava, DVec3::new(28.0, 0.0, 1.0), DVec3::new(-7.5, 0.0, 0.0)).with_mass_radius(40.0, 2.2);
@@ -318,81 +458,100 @@ fn head_on(u: &mut Universe) {
 }
 
 fn binary(u: &mut Universe) {
-    // Heavy stars + planets beyond ~4x the binary separation (circumbinary
-    // orbits closer than ~3.5x are unstable), spaced >= 8 mutual Hill radii apart.
-    let m1 = 360_000.0;
-    let m2 = 240_000.0;
-    let sep = 120.0;
+    // A star a little bigger than the Sun and an orange dwarf, a fifth of the
+    // Earth-Sun distance apart, going round each other every 24 days. The planets
+    // go round the pair, all beyond 4x the stars' separation (closer than about
+    // 3.5x and an orbit round two stars does not last).
+    let m1 = 1.1 * SUN_MASS;
+    let m2 = 0.7 * SUN_MASS;
+    let sep = au(0.2);
     let r1 = sep * m2 / (m1 + m2);
     let r2 = sep * m1 / (m1 + m2);
     let v_rel = (u.g * (m1 + m2) / sep).sqrt();
     let v1 = v_rel * m2 / (m1 + m2);
     let v2 = v_rel * m1 / (m1 + m2);
-    let a = u.new_body("Alpha", BodyKind::Star, DVec3::new(r1, 0.0, 0.0), DVec3::new(0.0, 0.0, -v1)).with_mass_radius(m1, 13.0).with_temperature(9500.0);
-    let b = u.new_body("Beta", BodyKind::Star, DVec3::new(-r2, 0.0, 0.0), DVec3::new(0.0, 0.0, v2)).with_mass_radius(m2, 10.0).with_temperature(4300.0);
+    let a = u.new_body("Alpha", BodyKind::Star, DVec3::new(r1, 0.0, 0.0), DVec3::new(0.0, 0.0, -v1)).with_mass_radius(m1, 1.15 * SUN_RADIUS).with_temperature(6100.0);
+    let b = u.new_body("Beta", BodyKind::Star, DVec3::new(-r2, 0.0, 0.0), DVec3::new(0.0, 0.0, v2)).with_mass_radius(m2, 0.68 * SUN_RADIUS).with_temperature(4300.0);
     u.add(a);
     u.add(b);
     // Circumbinary planets orbit the pair's barycentre.
     let total = m1 + m2;
-    let mk = |u: &mut Universe, name: &str, kind: BodyKind, mass: f64, radius: f64, dist: f64, ang: f64| {
+    let mk = |u: &mut Universe, name: &str, kind: BodyKind, dist: f64, ang: f64| {
         let pos = DVec3::new(ang.cos(), 0.0, ang.sin()) * dist;
         let speed = (u.g * total / dist).sqrt();
         let vel = DVec3::Y.cross(pos).normalize() * speed;
-        let b = u.new_body(name, kind, pos, vel).with_mass_radius(mass, radius);
+        let b = u.new_body(name, kind, pos, vel);
         u.add(b)
     };
-    mk(u, "Tatooine", BodyKind::Desert, 6.0, 1.6, 520.0, 0.3);
-    mk(u, "Verdant", BodyKind::Earthlike, 35.0, 2.0, 720.0, 5.5);
-    let gg = mk(u, "Goliath", BodyKind::GasGiant, 180.0, 5.5, 1250.0, 2.5);
+    mk(u, "Tatooine", BodyKind::Desert, au(0.85), 0.3);
+    mk(u, "Verdant", BodyKind::Earthlike, au(1.3), 5.5);
+    let gg = mk(u, "Goliath", BodyKind::GasGiant, au(3.6), 2.5);
     if let Some(b) = u.get_mut(gg) {
-        b.ring = Some(crate::body::Ring { inner: 7.0, outer: 10.0, color: Vec3::new(0.7, 0.6, 0.55), opacity: 0.6 });
+        let r = b.radius as f32;
+        b.ring = Some(Ring { inner: r * 1.3, outer: r * 2.0, color: Vec3::new(0.7, 0.6, 0.55), opacity: 0.6 });
         b.tilt = 0.3;
     }
-    mk(u, "Frost", BodyKind::Ice, 4.0, 1.3, 2050.0, 4.4);
+    mk(u, "Frost", BodyKind::Ice, au(7.5), 4.4);
     zero_momentum(u);
     u.event("Two suns in the sky. Planets orbit the pair together.");
 }
 
+/// Gargantua: four million times the mass of the Sun, like the black hole in the
+/// middle of our own galaxy. Its real size follows from that: 12 million km.
+const GARGANTUA_MASS: f64 = 4.0e6 * SUN_MASS;
+const GARGANTUA_RADIUS: f64 = 2.0 * GARGANTUA_MASS / (units::LIGHT_SPEED * units::LIGHT_SPEED);
+
 fn black_hole_feast(u: &mut Universe) {
+    let rs = GARGANTUA_RADIUS;
     let mut bh = u.new_body("Gargantua", BodyKind::BlackHole, DVec3::ZERO, DVec3::ZERO);
-    bh.mass = 30000.0;
-    bh.radius = black_hole_radius(bh.mass);
+    bh.mass = GARGANTUA_MASS;
+    bh.radius = black_hole_radius(bh.mass, true);
     bh.feeding = 2.0;
     let bh_id = u.add(bh);
-    // A star on a plunging orbit that will be tidally disrupted.
-    let mut star = u.new_body("Doomed Star", BodyKind::Star, DVec3::new(160.0, 5.0, 0.0), DVec3::new(0.0, 0.0, -6.0)).with_mass_radius(3000.0, 6.0).with_temperature(4800.0);
-    star.spin_rate = 0.1;
+    let circular = |r: f64| (GARGANTUA_MASS / r).sqrt();
+    // A star like the Sun on a plunging orbit: it will be pulled apart.
+    let mut star = u.new_body("Doomed Star", BodyKind::Star, DVec3::new(18.0 * rs, 0.5 * rs, 0.0), DVec3::new(0.0, 0.0, -0.44 * circular(18.0 * rs))).with_temperature(4800.0);
+    star.spin_rate = units::spin_rate(400.0);
     u.add(star);
-    add_orbiting(u, bh_id, "Miller", BodyKind::Earthlike, 30.0, 1.8, 110.0, 2.0, 0.05);
-    add_orbiting(u, bh_id, "Mann", BodyKind::Ice, 8.0, 1.5, 180.0, 4.0, -0.04);
-    add_orbiting(u, bh_id, "Edmunds", BodyKind::Desert, 10.0, 1.6, 240.0, 1.0, 0.02);
-    let s2 = u.new_body("Wanderer", BodyKind::Rocky, DVec3::new(-90.0, 0.0, 260.0), DVec3::new(2.0, 0.0, -7.0)).with_mass_radius(3.0, 1.1);
+    // Planets far enough out (for now) not to be pulled apart themselves.
+    add_orbiting(u, bh_id, "Miller", BodyKind::Earthlike, units::EARTH_MASS, 2.0, 12.0 * rs, 2.0, 0.05);
+    add_orbiting(u, bh_id, "Mann", BodyKind::Ice, 8.0, 1.5, 20.0 * rs, 4.0, -0.04);
+    add_orbiting(u, bh_id, "Edmunds", BodyKind::Desert, 10.0, 1.6, 27.0 * rs, 1.0, 0.02);
+    let v = circular(30.0 * rs);
+    let s2 = u.new_body("Wanderer", BodyKind::Rocky, DVec3::new(-10.0 * rs, 0.0, 29.0 * rs), DVec3::new(0.15 * v, 0.0, -0.52 * v)).with_mass_radius(3.0, 1.1);
     u.add(s2);
     // Glowing gas spiralling around it.
-    asteroid_belt(u, DVec3::ZERO, DVec3::ZERO, 30000.0, 40.0, 90.0, 4000, Vec3::new(1.0, 0.55, 0.25) * 1.5);
-    u.event("A supermassive black hole. Fly things close and watch them get spaghettified.");
+    asteroid_belt(u, DVec3::ZERO, DVec3::ZERO, GARGANTUA_MASS, 4.4 * rs, 10.0 * rs, 4000, Vec3::new(1.0, 0.55, 0.25) * 1.5, (rs * 0.012) as f32);
+    u.event("A giant black hole, four million times as heavy as the Sun. Fly things close and watch them get spaghettified.");
 }
 
 fn supernova(u: &mut Universe) {
-    let star = u.new_body("Rigel B", BodyKind::Star, DVec3::ZERO, DVec3::ZERO).with_mass_radius(20000.0, 22.0).with_temperature(13000.0);
+    // A blue giant: twelve times the mass of the Sun and six times as wide.
+    let star = u.new_body("Rigel B", BodyKind::Star, DVec3::ZERO, DVec3::ZERO).with_mass_radius(12.0 * SUN_MASS, 6.0 * SUN_RADIUS).with_temperature(20000.0);
     let id = u.add(star);
-    add_orbiting(u, id, "Cinder", BodyKind::Lava, 8.0, 1.5, 70.0, 0.4, 0.0);
-    add_orbiting(u, id, "Oasis", BodyKind::Earthlike, 40.0, 2.1, 140.0, 2.1, 0.02);
-    let gg = add_orbiting(u, id, "Titanus", BodyKind::GasGiant, 200.0, 5.5, 230.0, 4.0, -0.03);
+    let planet = |u: &mut Universe, name: &str, kind: BodyKind, dist: f64, ang: f64, incl: f64| {
+        let (mass, radius) = kind.defaults(true);
+        add_orbiting(u, id, name, kind, mass, radius, dist, ang, incl)
+    };
+    planet(u, "Cinder", BodyKind::Lava, au(0.3), 0.4, 0.0);
+    planet(u, "Oasis", BodyKind::Earthlike, au(0.6), 2.1, 0.02);
+    let gg = planet(u, "Titanus", BodyKind::GasGiant, au(1.0), 4.0, -0.03);
     if let Some(b) = u.get_mut(gg) {
-        b.ring = Some(crate::body::Ring { inner: 7.0, outer: 11.0, color: Vec3::new(0.7, 0.75, 0.8), opacity: 0.7 });
+        let r = b.radius as f32;
+        b.ring = Some(Ring { inner: r * 1.3, outer: r * 2.1, color: Vec3::new(0.7, 0.75, 0.8), opacity: 0.7 });
         b.tilt = 0.4;
     }
-    add_orbiting(u, id, "Glacier", BodyKind::Ice, 6.0, 1.3, 330.0, 5.5, 0.05);
-    add_orbiting(u, id, "Rust", BodyKind::Desert, 6.0, 1.4, 420.0, 1.0, 0.0);
+    planet(u, "Glacier", BodyKind::Ice, au(1.6), 5.5, 0.05);
+    planet(u, "Rust", BodyKind::Desert, au(2.3), 1.0, 0.0);
     zero_momentum(u);
-    u.trigger_supernova(id, 20.0);
+    // Twenty seconds of play at the speed the preset starts at.
+    u.trigger_supernova(id, 20.0 * Preset::Supernova.time_scale());
 }
 
 fn galaxy(u: &mut Universe, name: &str, center: DVec3, vel: DVec3, tilt: DQuat, mass: f64, count: usize, radius: f64, warm: Vec3, cool: Vec3) {
     let mut bh = u.new_body(name, BodyKind::BlackHole, center, vel);
     bh.mass = mass;
-    bh.radius = black_hole_radius(mass);
+    bh.radius = black_hole_radius(mass, false);
     bh.feeding = 2.0;
     u.add(bh);
     let arms = 2;
@@ -479,7 +638,7 @@ fn protoplanetary(u: &mut Universe) {
         b.surface.terrain = 0.06;
         u.add(b);
     }
-    asteroid_belt(u, DVec3::ZERO, DVec3::ZERO, 8000.0, 20.0, 260.0, 9000, Vec3::new(0.8, 0.5, 0.3) * 2.5);
+    asteroid_belt(u, DVec3::ZERO, DVec3::ZERO, 8000.0, 20.0, 260.0, 9000, Vec3::new(0.8, 0.5, 0.3) * 2.5, 0.11);
     zero_momentum(u);
     u.collisions = crate::universe::CollisionMode::AlwaysMerge;
     u.event("A young star surrounded by planetesimals. Speed up time and watch them merge into planets.");
@@ -569,6 +728,7 @@ pub fn build_custom(u: &mut Universe, p: &CustomParams) {
 
 fn build_custom_bodies(u: &mut Universe, p: &CustomParams) {
     u.reset(&p.name);
+    u.real_scale = true;
     u.g = p.gravity;
     u.rng = Rng::new(p.seed);
     let mut rng = Rng::new(p.seed.wrapping_add(7));
@@ -576,57 +736,62 @@ fn build_custom_bodies(u: &mut Universe, p: &CustomParams) {
     let mut center_id = None;
     match p.center {
         CenterKind::SunLike => {
-            let s = u.new_body(&random_name(&mut rng), BodyKind::Star, DVec3::ZERO, DVec3::ZERO).with_mass_radius(400_000.0, 16.0).with_temperature(5800.0);
+            let s = u.new_body(&random_name(&mut rng), BodyKind::Star, DVec3::ZERO, DVec3::ZERO).with_mass_radius(SUN_MASS, SUN_RADIUS).with_temperature(units::SUN_TEMPERATURE);
             central_mass = s.mass;
             center_id = Some(u.add(s));
         }
         CenterKind::RedDwarf => {
-            let s = u.new_body(&random_name(&mut rng), BodyKind::Star, DVec3::ZERO, DVec3::ZERO).with_mass_radius(160_000.0, 8.0).with_temperature(3300.0);
+            let s = u.new_body(&random_name(&mut rng), BodyKind::Star, DVec3::ZERO, DVec3::ZERO).with_mass_radius(0.3 * SUN_MASS, 0.32 * SUN_RADIUS).with_temperature(3300.0);
             central_mass = s.mass;
             center_id = Some(u.add(s));
         }
         CenterKind::BlueGiant => {
-            let s = u.new_body(&random_name(&mut rng), BodyKind::Star, DVec3::ZERO, DVec3::ZERO).with_mass_radius(720_000.0, 26.0).with_temperature(14000.0);
+            let s = u.new_body(&random_name(&mut rng), BodyKind::Star, DVec3::ZERO, DVec3::ZERO).with_mass_radius(4.0 * SUN_MASS, 3.0 * SUN_RADIUS).with_temperature(14000.0);
             central_mass = s.mass;
             center_id = Some(u.add(s));
         }
         CenterKind::Binary => {
-            let (m1, m2, sep) = (280_000.0, 200_000.0, 100.0);
+            let (m1, m2, sep) = (1.0 * SUN_MASS, 0.7 * SUN_MASS, au(0.2));
             let v_rel = (u.g * (m1 + m2) / sep).sqrt();
             let a = u.new_body(&random_name(&mut rng), BodyKind::Star, DVec3::new(sep * m2 / (m1 + m2), 0.0, 0.0), DVec3::new(0.0, 0.0, -v_rel * m2 / (m1 + m2)))
-                .with_mass_radius(m1, 10.0)
-                .with_temperature(7500.0);
+                .with_mass_radius(m1, SUN_RADIUS)
+                .with_temperature(6000.0);
             let b = u.new_body(&random_name(&mut rng), BodyKind::Star, DVec3::new(-sep * m1 / (m1 + m2), 0.0, 0.0), DVec3::new(0.0, 0.0, v_rel * m1 / (m1 + m2)))
-                .with_mass_radius(m2, 8.0)
-                .with_temperature(4000.0);
+                .with_mass_radius(m2, 0.68 * SUN_RADIUS)
+                .with_temperature(4300.0);
             u.add(a);
             u.add(b);
             central_mass = m1 + m2;
         }
         CenterKind::BlackHole => {
             let mut bh = u.new_body(&random_name(&mut rng), BodyKind::BlackHole, DVec3::ZERO, DVec3::ZERO);
-            bh.mass = 300_000.0;
-            bh.radius = black_hole_radius(bh.mass);
+            bh.mass = 10.0 * SUN_MASS;
+            bh.radius = black_hole_radius(bh.mass, true);
             central_mass = bh.mass;
             center_id = Some(u.add(bh));
             // A black hole gives no light: add a distant companion star as a lamp.
             // ...on a wide circular orbit so it doesn't fall in.
-            let lamp_pos = DVec3::new(0.0, 1500.0, -6000.0);
+            let lamp_pos = DVec3::new(0.0, au(20.0), au(-80.0));
             let lamp_vel = DVec3::Y.cross(lamp_pos).normalize() * (u.g * central_mass / lamp_pos.length()).sqrt();
-            let lamp = u.new_body("Companion", BodyKind::Star, lamp_pos, lamp_vel).with_mass_radius(1.0, 40.0).with_temperature(20000.0);
+            // (Bright enough to light the planets from that far, and almost weightless.)
+            let lamp = u.new_body("Companion", BodyKind::Star, lamp_pos, lamp_vel).with_mass_radius(1.0, 4.0 * SUN_RADIUS).with_temperature(20000.0);
             u.add(lamp);
         }
         CenterKind::Nothing => {
-            let lamp = u.new_body("Distant Star", BodyKind::Star, DVec3::new(-1500.0, 800.0, -3000.0), DVec3::ZERO).with_mass_radius(1.0, 30.0).with_temperature(16000.0);
+            let lamp_pos = DVec3::new(-1500.0, 800.0, -3000.0).normalize() * au(60.0);
+            let lamp = u.new_body("Distant Star", BodyKind::Star, lamp_pos, DVec3::ZERO).with_mass_radius(1.0, 4.0 * SUN_RADIUS).with_temperature(16000.0);
             u.add(lamp);
         }
     }
+    // Where the first planet goes.
     let base = match p.center {
-        CenterKind::Binary => 420.0, // circumbinary orbits need > ~3.5x the binary separation
-        CenterKind::BlueGiant => 300.0,
-        CenterKind::RedDwarf => 110.0,
-        CenterKind::BlackHole => 250.0,
-        _ => 160.0,
+        CenterKind::Binary => au(0.85), // circumbinary orbits need > ~3.5x the binary separation
+        CenterKind::BlueGiant => au(2.0),
+        CenterKind::RedDwarf => au(0.07),
+        CenterKind::BlackHole => au(0.6),
+        CenterKind::SunLike => au(0.4),
+        // Rogue planets with no star: a loose huddle.
+        CenterKind::Nothing => 300.0,
     };
     // Previous planet's (distance, mass); the first planet sits at `base`.
     let mut prev: Option<(f64, f64)> = None;
@@ -636,7 +801,7 @@ fn build_custom_bodies(u: &mut Universe, p: &CustomParams) {
         if Some(k) == belt_slot && central_mass > 0.0 {
             let inner = prev.map(|(d, _)| d * 1.35).unwrap_or(next_min).max(next_min);
             let outer = inner * 1.3;
-            asteroid_belt(u, DVec3::ZERO, DVec3::ZERO, central_mass, inner, outer, 2000, Vec3::new(0.55, 0.5, 0.45));
+            asteroid_belt(u, DVec3::ZERO, DVec3::ZERO, central_mass, inner, outer, 2000, Vec3::new(0.55, 0.5, 0.45) * 1.8, 0.3);
             // keep the next planet clear of the belt
             prev = None;
             next_min = outer * 1.3;
@@ -656,7 +821,7 @@ fn build_custom_bodies(u: &mut Universe, p: &CustomParams) {
                 BodyKind::Ice
             }
         };
-        let (m0, r0) = kind.defaults();
+        let (m0, r0) = kind.defaults(true);
         let scale = rng.range(0.6, 1.5);
         let mass = m0 * scale;
         let radius = r0 * scale.cbrt();

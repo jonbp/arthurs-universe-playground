@@ -1,5 +1,9 @@
 use glam::{DVec3, Mat4, Vec2, Vec3, Vec4};
 
+/// The furthest the camera can pull back: far enough to see well past Neptune
+/// (which is 1.4 million units from the Sun in a universe built to scale).
+pub const MAX_DISTANCE: f64 = 5.0e7;
+
 /// Orbit camera. Rendering is camera-relative (the eye sits at the origin) so
 /// f32 precision stays good even in huge universes.
 pub struct Camera {
@@ -10,6 +14,8 @@ pub struct Camera {
     pub desired_distance: f64,
     pub fov_y: f32,
     pub follow: Option<u64>,
+    /// The closest the camera may come: small when following a small world.
+    pub min_distance: f64,
     follow_offset: DVec3,
 }
 
@@ -34,6 +40,7 @@ impl Camera {
             desired_distance: 400.0,
             fov_y: 50f32.to_radians(),
             follow: None,
+            min_distance: 0.3,
             follow_offset: DVec3::ZERO,
         }
     }
@@ -51,7 +58,11 @@ impl Camera {
     pub fn focus_on(&mut self, id: u64, pos: DVec3, radius: f64) {
         self.follow_offset = self.target - pos;
         self.follow = Some(id);
-        self.desired_distance = (radius * 7.0).max(2.0);
+        self.min_distance = (radius * 1.5).clamp(0.002, 0.3);
+        self.desired_distance = (radius * 7.0).max(self.min_distance);
+        // Glide the last stretch only: across a whole solar system the camera would
+        // still be on its way seconds later, with the body nowhere in sight.
+        self.follow_offset = self.follow_offset.clamp_length_max(self.desired_distance * 20.0);
     }
 
     pub fn rotate(&mut self, dx: f64, dy: f64) {
@@ -60,7 +71,7 @@ impl Camera {
     }
 
     pub fn zoom(&mut self, amount: f64) {
-        self.desired_distance = (self.desired_distance * (1.0 - amount * 0.12).clamp(0.3, 3.0)).clamp(0.3, 50000.0);
+        self.desired_distance = (self.desired_distance * (1.0 - amount * 0.12).clamp(0.3, 3.0)).clamp(self.min_distance, MAX_DISTANCE);
     }
 
     pub fn pan(&mut self, dx: f64, dy: f64) {
@@ -80,7 +91,10 @@ impl Camera {
         self.distance += (self.desired_distance - self.distance) * k;
         match (self.follow, follow_pos) {
             (Some(_), Some(p)) => {
-                self.follow_offset *= (-dt * 5.0).exp();
+                self.follow_offset *= (-dt * 6.0).exp();
+                if self.follow_offset.length() < self.distance * 1e-3 {
+                    self.follow_offset = DVec3::ZERO;
+                }
                 self.target = p + self.follow_offset;
             }
             (Some(_), None) => self.follow = None,
@@ -89,7 +103,7 @@ impl Camera {
     }
 
     pub fn frame(&self, width: f32, height: f32) -> CameraFrame {
-        let near = (self.distance * 0.002).clamp(0.005, 2.0) as f32;
+        let near = (self.distance * 0.002).clamp(0.00002, 2.0) as f32;
         CameraFrame::look(self.eye(), self.forward(), DVec3::Y, self.fov_y, near, width, height)
     }
 }

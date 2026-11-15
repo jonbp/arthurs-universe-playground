@@ -253,7 +253,7 @@ mod tests {
     use crate::util::Rng;
 
     fn body(kind: BodyKind) -> Body {
-        Body::new(1, "Test", kind, DVec3::ZERO, DVec3::ZERO, &mut Rng::new(7))
+        Body::new(1, "Test", kind, DVec3::ZERO, DVec3::ZERO, false, &mut Rng::new(7))
     }
 
     #[test]

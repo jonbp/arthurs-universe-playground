@@ -28,6 +28,7 @@ mod settings;
 mod terrain;
 mod ui;
 mod universe;
+mod units;
 mod update;
 mod util;
 mod vkctx;
@@ -488,6 +489,7 @@ impl State {
             selected: self.game.selected,
             hovered: self.game.hovered,
             time: self.game.real_time as f32,
+            on_orbit: &self.game.on_orbit,
         };
         scene::build_frame(&mut self.frame_data, &self.game.universe, &cam, &opts, &self.game.preview, &self.extras);
         // Frosted side panels: tell the composite pass where to blur the scene (screen uv).

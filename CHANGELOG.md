@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Everything is its real size.** The Solar System is now built to scale from NASA's figures: the Sun is 109 Earths wide and 150 million km away, Jupiter is 11 Earths wide, and every planet and moon has its real mass, its real slightly oval and tilted orbit, its real day and its real tilt. The planets start where they really were on 1 January 2000. A year takes a year, a month a month: at the starting speed of a week a second the Earth goes round the Sun in 52 seconds and Neptune takes two and a half hours.
+- **More of the Solar System.** Charon, Vesta, and the bigger moons of Saturn (Mimas, Enceladus, Tethys, Dione, Rhea, Iapetus) and Uranus (Miranda, Ariel, Umbriel, Titania, Oberon) join the ones that were there. Phobos and Deimos are their real size: tiny.
+- **Finding things in all that space.** A world too far away to see is drawn as a dot, with a line showing its orbit (bright behind it, so you can tell which way it is going). Double-click a world, or press Follow, to fly the camera to it. The lines go on and off with the trails button (T).
+- **Speed is now time per second.** The speed control reads 30 min/s, 1 day/s, 1 week/s, 1 month/s, 1 year/s, and goes up to 10 years/s. The clock shows the hours, days and years gone by.
+- **Real numbers in the inspector.** Distances in km, speeds in km/s, orbits and days in hours, days and years, masses in Earths or Suns, sizes in km.
+- **The other universes are to scale too.** The rogue black hole weighs ten Suns and arrives at 60 km/s. Gargantua in Black Hole Feast is four million Suns and 12 million km across, like the black hole in the middle of our galaxy, and what orbits it moves at a good part of the speed of light. The binary stars and the supernova's blue giant are real star sizes with planets at real distances. Create your own universe makes real-size systems. Galaxy Collision and Protoplanetary Disk stay as models: at their real size and pace there would be nothing to see in a lifetime.
+- The Spawn and Smash tools offer real worlds: a star like the Sun, a gas giant like Jupiter, an ice giant like Neptune.
+- Collapsing a world into a black hole keeps its mass, as it really would: its moons carry on round it.
+- Saved universes from older versions still load, at their old made-up scale and with plain numbers.
+
+### Fixed
+
+- The inspector no longer says the Moon orbits the Sun, or the Sun orbits Jupiter.
+- Time can be sped up much further before orbits go wrong: the physics now takes long steps when nothing is close together and short ones when something is.
+
 ## [1.4.0] - 2026-11-14
 
 ### Added

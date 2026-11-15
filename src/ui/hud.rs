@@ -192,8 +192,8 @@ pub(super) fn conditions_section(ui: &mut Ui, c: &Conditions) {
         ui.spacing_mut().item_spacing.x = 6.0;
         let light = if c.sunlight >= 10.0 { format!("{:.0}×", c.sunlight) } else { format!("{:.0}%", c.sunlight * 100.0) };
         stat_cell(ui, "Sunlight", &light, TEXT, w);
-        stat_cell(ui, "Day length", &c.day_length.map(fmt_time).unwrap_or_else(|| "Never ends".into()), TEXT, w);
-        stat_cell(ui, "Escape speed", &format!("{:.1}", c.escape_speed), TEXT, w);
+        stat_cell(ui, "Day length", &c.day_length.map(|d| units::fmt_duration(d, c.real_scale)).unwrap_or_else(|| "Never ends".into()), TEXT, w);
+        stat_cell(ui, "Escape speed", &units::fmt_speed(c.escape_speed, c.real_scale), TEXT, w);
     });
     if c.day_k - c.night_k > 15.0 {
         fact_row(ui, Icon::Sun, "Swing", &format!("{} by day, {} at night", fmt_temp(c.day_k), fmt_temp(c.night_k)));
